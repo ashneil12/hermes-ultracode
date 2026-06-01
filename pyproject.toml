@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-ultracode"
+version = "0.1.0"
+description = "Deterministic orchestration harness: decompose -> fan-out -> adversarially verify -> synthesize. Runtime-agnostic (no deps)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "ashneil12" }]
+keywords = ["llm", "agents", "orchestration", "verification", "deep-research", "code-audit"]
+dependencies = []  # core package is stdlib-only; backends are dependency-injected
+
+[project.optional-dependencies]
+# only the benchmark suite needs a real client
+bench = ["openai>=1.0"]
+dev = ["pytest>=7"]
+
+[tool.setuptools]
+packages = ["ultracode"]
+
+[tool.pytest.ini_options]
+addopts = ""
+testpaths = ["tests"]
