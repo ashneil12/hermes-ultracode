@@ -230,10 +230,13 @@ def run(
                 led.event("done", res.summary())
             return res
         seed_findings = solo_findings   # always build ON the solo pass (union -> recall)
-        # FULL (loop-until-dry) is reserved for genuinely large, unbounded find-all
-        # work; everything else that warrants orchestration gets the cheap LIGHT
-        # ensemble. This keeps small tasks at ~light cost instead of 80k-token loops.
-        go_full = bool(tv.orchestrate and decision.loop_until_dry and len(context) > cfg.full_orchestration_min_chars)
+        # FULL (loop-until-dry) is reserved for genuinely large, orchestration-worthy
+        # work; everything else gets the cheap LIGHT ensemble. This is a COST gate on
+        # size + stakes ONLY — it must NOT also decide loop INTENT. Whether to loop is
+        # the agent's reasoned shape (or the keyword fallback), reconciled below; gating
+        # the loop on `decision.loop_until_dry` here would let the crude keyword steerer
+        # silently veto a loop the agent explicitly reasoned. Keep the two separate.
+        go_full = bool(tv.orchestrate and len(context) > cfg.full_orchestration_min_chars)
         light = not go_full
         pre_stages = ["solo-audit", "triage:" + ("full" if go_full else "light")]
 
@@ -279,9 +282,11 @@ def run(
             subtasks = plan.subtasks
         else:
             # emergent decomposition: re-DERIVE targeted subtasks from findings-so-far,
-            # rather than re-running the same finders. The work-list is a living object.
+            # rather than re-running the same finders. The work-list is a living object —
+            # and it stays coherent with the agent's OWN reasoned strategy (not blind).
             summaries = [f"{f.claim} ({f.locator})" for f in known]
             subtasks = replan_for_gaps(task, summaries, context=context, max_subtasks=cfg.max_finders,
+                                       strategy=(approach.reasoning if approach.ok else ""),
                                        aux_call_fn=aux_call_fn, agent=agent, model=model)
             if not subtasks:
                 return []  # planner declares the surface exhausted -> contributes to dry
@@ -301,7 +306,9 @@ def run(
             found.extend(_parse_findings(entry if isinstance(entry, dict) else {}, f"r{round_idx}:{label}"))
         return found
 
-    # loop if the AGENT chose 'loop' (or, in fallback, the heuristic said find-all); light caps it
+    # loop intent: the AGENT's reasoned shape is FIRST-CLASS; the keyword heuristic is
+    # only the fallback when the agent produced no usable plan. The cost gate (`light`)
+    # may cap it, but never silently — if it suppresses a loop the agent reasoned, say so.
     want_loop = (approach.shape == "loop") if approach.ok else decision.loop_until_dry
     effective_loop = want_loop and not light
     if effective_loop:
@@ -315,6 +322,13 @@ def run(
         # light/non-loop: solo UNION one finder wave -> recall >= any single pass
         findings = dedupe_findings(seed_findings + finder_round(0, []))
         stages = pre_stages + ["plan", "find(light)" if light else "find"]
+        if want_loop and light:
+            # the agent (or heuristic) asked to loop, but the size/stakes cost gate capped
+            # it to one wave — announce it (never silently override the reasoned shape).
+            caps.append(f"NOTE: a loop-until-dry was intended ({'agent-reasoned' if approach.ok else 'heuristic'}) "
+                        f"but capped to a single light wave by the cost gate (context "
+                        f"{len(context)} < full_orchestration_min_chars {cfg.full_orchestration_min_chars}, "
+                        f"or stakes below threshold); raise the gate or stakes to loop")
 
     # root-cause reconciliation: collapse near-duplicate findings (over-generation)
     if cfg.reconcile:

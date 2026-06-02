@@ -223,6 +223,7 @@ def replan_for_gaps(
     *,
     context: str = "",
     gaps: Optional[List[str]] = None,
+    strategy: str = "",
     max_subtasks: int = 3,
     aux_call_fn: Optional[Callable[..., Any]] = None,
     agent: Any = None,
@@ -230,11 +231,14 @@ def replan_for_gaps(
 ) -> List[SubtaskSpec]:
     """Emergent decomposition: given findings-so-far (and optional critic gaps),
     generate NEW targeted subtasks for the next discovery round — the work-list as
-    a living object, re-derived from evidence rather than re-run verbatim."""
+    a living object, re-derived from evidence rather than re-run verbatim. When the
+    agent reasoned its own approach, ``strategy`` carries that reasoning so the next
+    decomposition axis follows the agent's stated plan instead of being re-derived blind."""
     found = "\n".join(f"- {s}" for s in found_summaries[:60]) or "(nothing found yet)"
     gap_block = ("\nKNOWN GAPS to target:\n" + "\n".join(f"- {g}" for g in gaps[:10])) if gaps else ""
+    strat_block = (f"\nYOUR OVERALL STRATEGY (stay coherent with it):\n{strategy.strip()}\n") if strategy.strip() else ""
     user = (
-        f"TASK:\n{task}\n\n"
+        f"TASK:\n{task}\n{strat_block}\n"
         f"{('MATERIAL:' + chr(10) + context + chr(10) + chr(10)) if context else ''}"
         f"ALREADY FOUND:\n{found}\n{gap_block}\n\n"
         f"Produce up to {max_subtasks} NEW subtasks that investigate what is still uncovered.\n"

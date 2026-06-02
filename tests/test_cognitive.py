@@ -257,6 +257,57 @@ def test_harness_discernment_small_findall_stays_light():
     assert not any("discover(loop" in s for s in res.stages)
 
 
+def test_agent_reasoned_loop_wins_over_keyword_heuristic():
+    # the HIGH fix: when the AGENT reasons shape='loop', the full loop must run on a big,
+    # orchestration-worthy task even when the keyword steerer saw no 'find-all' phrasing
+    # (no silent demotion of the reasoned shape to a single light wave).
+    big = "def f():\n    return 1\n" * 400  # > full_orchestration_min_chars, no find-all words
+
+    def aux(**kwargs):
+        sysm = kwargs["messages"][0]["content"].lower()
+        if "expert auditor" in sysm:
+            return json.dumps({"findings": [], "answer": "solo: nothing obvious"})
+        if "deciding whether to escalate" in sysm:
+            return json.dumps({"confidence": 0.4, "stakes": "high", "gaps": ["depth"], "orchestrate": True})
+        if "ultracode orchestrator" in sysm:  # plan_approach -> agent reasons a LOOP
+            return json.dumps({"reasoning": "open-ended; sweep until dry", "shape": "loop",
+                               "worker_directive": "find issues", "skeptic_directive": "verify",
+                               "synthesis_directive": "combine", "subtasks": [{"goal": "probe area A"}]})
+        if "re-planning" in sysm:   # signal the surface is exhausted -> loop terminates
+            return json.dumps({"subtasks": []})
+        if "completeness critic" in sysm:
+            return json.dumps({"gaps": [], "coverage_note": "ok"})
+        if "synthesizer" in sysm:
+            return "FINAL."
+        return "answer"
+
+    def delegate(*, tasks, parent_agent, role):
+        out = []
+        for i, t in enumerate(tasks):
+            if "adversarial verifier" in t["goal"]:
+                out.append({"task_index": i, "status": "completed", "summary": json.dumps({"verdict": "confirmed", "rationale": "m"})})
+            else:
+                out.append({"task_index": i, "status": "completed",
+                            "summary": json.dumps({"findings": [{"claim": "issue in A", "locator": "a.py:3", "evidence": "e", "severity": "medium"}]})})
+        return json.dumps({"results": out})
+
+    res = run("Investigate and explain the retry/backoff behavior in depth", context=big,
+              aux_call_fn=aux, delegate_fn=delegate, enable_ledger=False,
+              config=UltracodeConfig(verify_lenses=[VerifyLens.CORRECTNESS]))
+    assert res.mode == "ultracode"                                   # looped, not demoted to light
+    assert any("discover(loop" in s for s in res.stages)             # the loop actually ran
+
+
+def test_cost_capped_loop_is_announced_not_silent():
+    # when the size/stakes gate caps an intended loop to one wave, it must be ANNOUNCED.
+    aux, delegate = _make_harness_fakes(triage_orchestrate=True)
+    # small context + a find-all task: heuristic wants loop, but it's under the size gate
+    res = run("find all bugs", context="<short>", aux_call_fn=aux, delegate_fn=delegate,
+              enable_ledger=False, config=UltracodeConfig(verify_lenses=[VerifyLens.CORRECTNESS]))
+    assert res.mode == "discerned-light"
+    assert any("capped to a single light wave" in c for c in res.caps_announced)  # not silent
+
+
 def test_harness_discernment_stays_solo_when_bounded_and_confident():
     # the cost fix for general-use: a BOUNDED task (not find-all) where triage is
     # confident (high conf, low stakes, no gaps) terminates at solo — ensembling a
