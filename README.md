@@ -99,8 +99,9 @@ python -m pytest tests/ -q -o addopts=""          # 119 tests, no network
 
 The `bench/` suite drives a real model. It reads its API key from the environment
 (`DEEPSEEK_API_KEY` or `~/.ultracode-bench/deepseek.env`) — **no keys are committed**. Some
-demonstration scripts (`adjudicate_hermes.py`, `arbiter_*.py`, `corpus_real.py`) expect a local
-checkout of the target codebase and are illustrative, not part of the test suite.
+demonstration scripts (`adjudicate_hermes.py`, `arbiter_*.py`, `corpus_real.py`,
+`corpus_openclaw.py`, `real_task.py`) hardcode local absolute paths to a target codebase
+checkout — they are illustrative, not part of the test suite; point them at your own path.
 
 ## Integrating into a host agent
 
