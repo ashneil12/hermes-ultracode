@@ -55,11 +55,15 @@ class FakeBackend:
     concurrently in its own pool (like the real client), updating the gauge."""
 
     def __init__(self, latency: float = 0.05, failure_rate: float = 0.0, gauge: ConcurrencyGauge = None,
-                 wave_workers: int = 64):
+                 wave_workers: int = 64, rendezvous: Any = None):
         self.latency = latency
         self.failure_rate = failure_rate
         self.gauge = gauge or ConcurrencyGauge()
         self.wave_workers = wave_workers
+        # optional rendezvous: every concurrently-alive task waits here before finishing,
+        # so the peak gauge DETERMINISTICALLY reaches the barrier size regardless of machine
+        # load — turns a timing-flaky parallelism check into an exact one.
+        self.rendezvous = rendezvous
         self._calls = 0
         self._calls_lock = threading.Lock()
 
@@ -71,6 +75,12 @@ class FakeBackend:
             i, t = i_t
             self.gauge.enter()
             try:
+                if self.rendezvous is not None:
+                    # all parties rendezvous at peak BEFORE any exits -> peak == barrier size.
+                    try:
+                        self.rendezvous.wait()
+                    except threading.BrokenBarrierError:
+                        pass  # a partial final generation times out -> just proceed
                 time.sleep(self.latency)
                 # deterministic pseudo-failure by index hash (no Math.random needed)
                 fail = self.failure_rate > 0 and (hash(t.get("goal", "")) % 100) < int(self.failure_rate * 100)
@@ -88,9 +98,18 @@ class FakeBackend:
         return json.dumps({"results": results})
 
 
-def probe(n: int, cap: int, concurrency: int, latency: float = 0.05, failure_rate: float = 0.0) -> Dict[str, Any]:
+def probe(n: int, cap: int, concurrency: int, latency: float = 0.05, failure_rate: float = 0.0,
+          deterministic: bool = True) -> Dict[str, Any]:
     gauge = ConcurrencyGauge()
-    backend = FakeBackend(latency=latency, failure_rate=failure_rate, gauge=gauge, wave_workers=max(cap, 64))
+    # Compute the TRUE expected peak from the same wave math delegate_fanout uses, and
+    # rendezvous exactly that many tasks so the parallelism check is deterministic (not a
+    # timing race that sags under load). expected_peak = wave_workers * per-wave width.
+    n_waves = (n + cap - 1) // cap
+    wave_workers = max(1, min(n_waves, (concurrency + cap - 1) // cap))
+    expected_peak = min(n, wave_workers * cap)
+    rendezvous = threading.Barrier(expected_peak, timeout=4.0) if (deterministic and expected_peak >= 1) else None
+    backend = FakeBackend(latency=latency, failure_rate=failure_rate, gauge=gauge,
+                          wave_workers=max(cap, 64), rendezvous=rendezvous)
     tasks = [{"goal": f"task {i}"} for i in range(n)]
     t0 = time.time()
     results = delegate_fanout(tasks, max_children=cap, concurrency=concurrency, delegate_fn=backend.delegate_fn)
@@ -105,6 +124,7 @@ def probe(n: int, cap: int, concurrency: int, latency: float = 0.05, failure_rat
         "unique": len(set(indices)) == len(indices),
         "errors": errors,
         "peak_concurrency": gauge.peak,
+        "expected_peak": expected_peak,
         "total_ran": gauge.total,
         "backend_calls": backend._calls,
         "wall_s": round(dt, 2),

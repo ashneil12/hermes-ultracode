@@ -79,11 +79,14 @@ ultracode/
   adjudicate.py   the accuracy gate (burden of proof)
   groundtruth.py  execute.py   execution arbiter (run a repro; resurrect over-killed reals)
   discovery.py    loop-until-dry; critic.py  completeness critic; judge.py  judge-panel
+  pipeline.py     the NO-BARRIER reactive driver — spawn sub-agents ON THE FLY as results
+                  come back (run_reactive); no-barrier DAG execution (drive_graph)
   corpus.py       repo.py      deep research / audit over a real on-disk corpus (chunk→fan-out)
-  schema.py       graph.py     reconcile/dedupe (contradiction-preserving), findings model
+  schema.py       graph.py     reconcile/dedupe (contradiction-preserving), DAG chassis, findings model
+  conductor.py    config.py    ledger.py   session-executive frame, knobs, run journal
   adapters.py     the only optional bridge to a host runtime (else pass your own call_fn)
   DOCTRINE.md     CONTRACTS.md the operating doctrine + the contracts gate
-tests/            108 tests, no live model (fakes injected)
+tests/            119 tests, no live model (fakes injected)
 bench/            the benchmark suite (code audit + research + corpus); reads its key from env
 REPORT.md         the full, honest engineering report — what works, what doesn't, and why
 ```
@@ -91,7 +94,7 @@ REPORT.md         the full, honest engineering report — what works, what doesn
 ## Tests & benchmarks
 
 ```bash
-python -m pytest tests/ -q -o addopts=""          # 108 tests, no network
+python -m pytest tests/ -q -o addopts=""          # 119 tests, no network
 ```
 
 The `bench/` suite drives a real model. It reads its API key from the environment
