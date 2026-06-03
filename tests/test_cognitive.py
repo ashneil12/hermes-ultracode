@@ -257,6 +257,50 @@ def test_harness_discernment_small_findall_stays_light():
     assert not any("discover(loop" in s for s in res.stages)
 
 
+def test_streaming_discovery_spawns_followup_finder_on_the_fly():
+    # the no-barrier path: a seed finder returns a HIGH-severity finding, which spawns a
+    # targeted follow-up finder ON THE FLY (via pipeline.run_reactive) — not a next round.
+    def aux(**kwargs):
+        sysm = kwargs["messages"][0]["content"].lower()
+        if "expert auditor" in sysm:
+            return json.dumps({"findings": [], "answer": "solo: nothing"})
+        if "ultracode orchestrator" in sysm:   # agent reasons a LOOP with one seed finder
+            return json.dumps({"reasoning": "probe the auth surface deeply", "shape": "loop",
+                               "worker_directive": "find bugs", "skeptic_directive": "verify",
+                               "synthesis_directive": "combine", "subtasks": [{"goal": "probe auth"}]})
+        if "re-planning" in sysm:               # react() -> spawn a follow-up from the hot finding
+            return json.dumps({"subtasks": [{"goal": "deep dive the token check"}]})
+        if "completeness critic" in sysm:
+            return json.dumps({"gaps": [], "coverage_note": "ok"})
+        if "synthesizer" in sysm:
+            return "FINAL."
+        return "answer"
+
+    def delegate(*, tasks, parent_agent, role):
+        out = []
+        for i, t in enumerate(tasks):
+            goal = t["goal"]
+            if "adversarial verifier" in goal:
+                out.append({"task_index": i, "status": "completed", "summary": json.dumps({"verdict": "confirmed", "rationale": "m"})})
+            elif "deep dive" in goal:            # the SPAWNED follow-up: returns a low finding (no further spawn)
+                out.append({"task_index": i, "status": "completed",
+                            "summary": json.dumps({"findings": [{"claim": "minor token nit", "locator": "t.py:9", "evidence": "e", "severity": "low"}]})})
+            else:                                 # the seed finder: returns a HIGH finding -> triggers a spawn
+                out.append({"task_index": i, "status": "completed",
+                            "summary": json.dumps({"findings": [{"claim": "auth bypass", "locator": "auth.py:3", "evidence": "e", "severity": "high"}]})})
+        return json.dumps({"results": out})
+
+    # AUTO default: streaming_discovery=None + a concurrency-safe backend (concurrency=4)
+    # -> streaming engages automatically, no explicit flag needed.
+    res = run("audit the auth code thoroughly", context="x" * 200,
+              aux_call_fn=aux, delegate_fn=delegate, force_orchestrate=True, enable_ledger=False,
+              config=UltracodeConfig(concurrency=4, verify_lenses=[VerifyLens.CORRECTNESS]))
+    assert any("stream-discover" in s for s in res.stages)               # the streaming path ran
+    assert any("spawned" in c and "ON THE FLY" in c for c in res.caps_announced)  # announced
+    claims = {f.claim for f in res.findings}
+    assert "auth bypass" in claims and "minor token nit" in claims        # seed + the on-the-fly spawn both ran
+
+
 def test_agent_reasoned_loop_wins_over_keyword_heuristic():
     # the HIGH fix: when the AGENT reasons shape='loop', the full loop must run on a big,
     # orchestration-worthy task even when the keyword steerer saw no 'find-all' phrasing

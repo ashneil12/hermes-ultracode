@@ -23,7 +23,7 @@ from ultracode.config import UltracodeConfig
 from ultracode.critic import completeness_critic
 from ultracode.discovery import discover
 from ultracode.ledger import RunLedger
-from ultracode.schema import Finding, StageResult, dedupe_findings, reconcile_findings
+from ultracode.schema import Finding, StageResult, SubtaskSpec, dedupe_findings, reconcile_findings
 from ultracode.steering import Decision, decide
 from ultracode.planner import Approach, Plan, plan as make_plan, plan_approach, replan_for_gaps
 from ultracode.triage import assess
@@ -102,6 +102,43 @@ def _parse_findings(entry: dict, source_label: str) -> List[Finding]:
             except ValueError:
                 continue
     return out
+
+
+def _streaming_discover(task, seed_subtasks, context, seed_findings, approach, directive_for,
+                        *, cfg, delegate_fn, aux_call_fn, agent, model) -> dict:
+    """No-barrier discovery: run seed finders, and the instant one returns a high-signal
+    finding, spawn a targeted follow-up finder ON THE FLY (it enters the pool while the
+    others are still running). The agent's reasoned strategy steers each spawn. Returns
+    {findings, dispatched, spawned, peak, caps}."""
+    from ultracode.pipeline import run_reactive
+
+    def _execute(st: SubtaskSpec) -> dict:
+        one = {"goal": _finder_prompt(st.goal, context, st.context, list(seed_findings), directive_for(st.goal))}
+        res = delegate_fanout([one], parent_agent=agent, max_children=cfg.max_children,
+                              concurrency=cfg.concurrency, delegate_fn=delegate_fn)
+        entry = res[0] if res else {}
+        return {"findings": _parse_findings(entry if isinstance(entry, dict) else {}, f"stream:{st.goal[:40]}")}
+
+    def _react(result, st, results_so_far):
+        # spawn a follow-up only when THIS finder surfaced a load-bearing (high/critical)
+        # finding worth a dedicated deeper probe — the agent's strategy decides the angle.
+        hot = [f for f in result["findings"] if (f.severity or "").lower() in ("high", "critical")]
+        if not hot:
+            return []
+        summaries = [f"{f.claim} ({f.locator})" for f in hot]
+        return replan_for_gaps(task, summaries, context=context, max_subtasks=2,
+                               strategy=(approach.reasoning if approach.ok else ""),
+                               aux_call_fn=aux_call_fn, agent=agent, model=model)
+
+    rep = run_reactive(list(seed_subtasks), _execute, _react,
+                       concurrency=(cfg.concurrency or 1), max_tasks=cfg.max_findings,
+                       spec_key=lambda s: s.goal.strip().lower())
+    findings = [f for r in rep.results for f in r["findings"]]
+    caps = list(rep.caps_announced)
+    caps.append(f"streaming discovery: {rep.dispatched} finders run, {rep.spawned} spawned ON THE FLY "
+                f"from high-signal results (peak {rep.peak_in_flight} concurrent)")
+    return {"findings": findings, "dispatched": rep.dispatched, "spawned": rep.spawned,
+            "peak": rep.peak_in_flight, "caps": caps}
 
 
 def _solo_audit(task: str, context: str, *, model, rt, aux_call_fn):
@@ -275,6 +312,14 @@ def run(
     if led:
         led.event("plan", {"n_subtasks": len(plan.subtasks), "delegated": plan.delegated, "rationale": plan.rationale})
 
+    # research depth: when the agent reasoned out its OWN worker_directive, trust it
+    # (the plan_approach meta-prompt already teaches depth-per-slice). Only inject the
+    # hardcoded per-facet depth mandate as a FALLBACK, when the agent gave us nothing.
+    def _directive_for(st_goal: str) -> str:
+        if tkind == TaskKind.RESEARCH and not approach.ok:
+            return worker_directive + "\n" + research_depth_directive(st_goal)
+        return worker_directive
+
     # --- find: one finder per subtask, looped-until-dry if the shape says so --
     def finder_round(round_idx: int, known: List[Finding]) -> List[Finding]:
         known = list(seed_findings) + list(known)  # finders always see the solo pass -> find NEW
@@ -290,13 +335,6 @@ def run(
                                        aux_call_fn=aux_call_fn, agent=agent, model=model)
             if not subtasks:
                 return []  # planner declares the surface exhausted -> contributes to dry
-        # research depth: when the agent reasoned out its OWN worker_directive, trust it
-        # (the plan_approach meta-prompt already teaches depth-per-slice). Only inject the
-        # hardcoded per-facet depth mandate as a FALLBACK, when the agent gave us nothing.
-        def _directive_for(st_goal: str) -> str:
-            if tkind == TaskKind.RESEARCH and not approach.ok:
-                return worker_directive + "\n" + research_depth_directive(st_goal)
-            return worker_directive
         tasks = [{"goal": _finder_prompt(st.goal, context, st.context, known, _directive_for(st.goal))} for st in subtasks]
         results = delegate_fanout(tasks, parent_agent=agent, max_children=cfg.max_children,
                                   concurrency=cfg.concurrency, delegate_fn=delegate_fn)
@@ -311,7 +349,29 @@ def run(
     # may cap it, but never silently — if it suppresses a loop the agent reasoned, say so.
     want_loop = (approach.shape == "loop") if approach.ok else decision.loop_until_dry
     effective_loop = want_loop and not light
-    if effective_loop:
+    # streaming discovery: explicit flag wins; AUTO (None) turns it on only when a
+    # concurrency-safe backend is configured — that's where parallel on-the-fly spawning
+    # is a real win. The serial thread-unsafe default stays round-based (cheaper replan
+    # profile), so nothing changes there until a real concurrency backend opts in.
+    if cfg.streaming_discovery is None:
+        use_streaming = bool(cfg.concurrency and cfg.concurrency > 1)
+    else:
+        use_streaming = bool(cfg.streaming_discovery)
+    if effective_loop and use_streaming:
+        # NO-BARRIER discovery: dispatch the seed finders, and the INSTANT one returns a
+        # high-signal finding, spawn a targeted follow-up finder that enters the pool while
+        # the others are still running — "spawn agents on the fly as work comes back",
+        # instead of waiting for a whole round. (See pipeline.run_reactive.)
+        rep = _streaming_discover(task, plan.subtasks, context, seed_findings, approach,
+                                  _directive_for, cfg=cfg, delegate_fn=delegate_fn,
+                                  aux_call_fn=aux_call_fn, agent=agent, model=model)
+        findings = dedupe_findings(seed_findings + rep["findings"])
+        caps.extend(rep["caps"])
+        stages = pre_stages + ["plan", f"stream-discover({rep['dispatched']} finders, "
+                               f"{rep['spawned']} on-the-fly, peak {rep['peak']} in flight)"]
+        if led:
+            led.event("stream_discovery", {"dispatched": rep["dispatched"], "spawned": rep["spawned"], "peak": rep["peak"]})
+    elif effective_loop:
         report = discover(finder_round, config=cfg, seen_keys={f.dedup_key() for f in seed_findings})
         findings = dedupe_findings(seed_findings + report.findings)
         caps.extend(report.caps_announced)

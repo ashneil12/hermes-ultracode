@@ -132,18 +132,27 @@ class TaskGraph:
         if not self._validated:
             self.validate()
         out: List[TaskRun] = []
-        for rid in self._order:
-            run = self._runs[rid]
-            if run.status != TaskStatus.PENDING:
-                continue
-            dep_statuses = [self._runs[d].status for d in run.spec.deps]
-            if any(s in (TaskStatus.FAILED, TaskStatus.SKIPPED) for s in dep_statuses):
-                run.status = TaskStatus.SKIPPED
-                run.error = "skipped: an upstream dependency did not complete"
-                continue
-            if all(s == TaskStatus.DONE for s in dep_statuses):
-                run.status = TaskStatus.READY
-                out.append(run)
+        # Fixpoint scan: a SKIP discovered late in one pass can render an
+        # earlier-inserted dependent unreachable too, so re-scan until no status
+        # changes. This makes ready() ORDER-INDEPENDENT — a dependent inserted
+        # before its dep is still correctly skipped in the same call, instead of
+        # being left PENDING for a later pass to (maybe) catch.
+        changed = True
+        while changed:
+            changed = False
+            for rid in self._order:
+                run = self._runs[rid]
+                if run.status != TaskStatus.PENDING:
+                    continue
+                dep_statuses = [self._runs[d].status for d in run.spec.deps]
+                if any(s in (TaskStatus.FAILED, TaskStatus.SKIPPED) for s in dep_statuses):
+                    run.status = TaskStatus.SKIPPED
+                    run.error = "skipped: an upstream dependency did not complete"
+                    changed = True  # may unblock-skip a dependent already scanned this pass
+                    continue
+                if all(s == TaskStatus.DONE for s in dep_statuses):
+                    run.status = TaskStatus.READY
+                    out.append(run)
         return out
 
     def mark_running(self, task_id: str) -> None:
