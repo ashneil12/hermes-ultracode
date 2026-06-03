@@ -1,5 +1,7 @@
 """Tests for execution-based ground-truth verification (REAL subprocess runs)."""
 
+import pytest
+
 from ultracode.execute import extract_code, run_python
 from ultracode.groundtruth import confirm_by_execution, ground_truth_pass
 from ultracode.schema import Finding
@@ -15,8 +17,12 @@ def test_run_python_raises_nonzero():
     assert not r.ok and "ValueError" in r.stderr
 
 
+# Use thread-method timeout for THIS test: the global --timeout-method=signal fires
+# SIGALRM, which on some Pythons (3.9) lands during run_python's subprocess waitpid and
+# hangs the reap. run_python's own subprocess timeout is the real assertion here.
+@pytest.mark.timeout(method="thread")
 def test_run_python_timeout():
-    r = run_python("while True:\n    pass", timeout=1.0)
+    r = run_python("import time\ntime.sleep(30)", timeout=1.0)  # idle child: clean SIGKILL reap
     assert r.timed_out and not r.ok
 
 
