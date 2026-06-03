@@ -67,6 +67,22 @@ pass.
 Proven on real corpora (`corpus.py`): a 715k-token codebase, the single pass recovers 1 of 42
 scattered classes (0.02); 286 chunk-extractors recover all 42 (1.00). Language/repo-agnostic.
 
+## Benchmark results (driving a deliberately weak model, DeepSeek-flash)
+
+Baseline is single-shot of the same model, or **Opus** for the head-to-heads. Full arc in
+[`BENCHMARK_SUMMARY.md`](./BENCHMARK_SUMMARY.md); cognitive + subjective detail in their reports.
+
+| benchmark | single-shot | ultracode | note |
+|---|---|---|---|
+| **cognitive reasoning** (109 hard tasks, vs Opus = 100%) | 84.4% | **91.7%** → **96.3%** (w/ execution-as-evidence) | orchestration *helps* objective reasoning |
+| **repo-scale audit / deep research** (real 715k-tok codebase) | 0.02 | **1.00** | the genuine win; gap *widens* with scale |
+| **weak-model precision** (12 real findings) | ~75% false positives | **12/12 correct** | adjudication + execution arbiter |
+| **cost** (audit tasks) | 1× | **~1.5×** | discernment, vs 30–78× when forced full-metal |
+| **subjective writing** (70 tasks, vs Opus) | 87% rubric | 84% rubric — **wash** | taste can't be orchestrated |
+
+**The keeper:** orchestration multiplies what the model *has* (search, breadth, verification, computation);
+it can't manufacture what it *lacks* (taste).
+
 ## Layout
 
 ```
@@ -78,6 +94,8 @@ ultracode/
   verify.py       adversarial skeptics — VOI-triaged, default-to-refuted, survival modes
   adjudicate.py   the accuracy gate (burden of proof)
   groundtruth.py  execute.py   execution arbiter (run a repro; resurrect over-killed reals)
+  compute.py      execution as a REASONING aid — agent writes+runs code for computable tasks,
+                  folded in as evidence (turns flash 91.7% -> 96.3% of Opus on the cognitive bench)
   discovery.py    loop-until-dry; critic.py  completeness critic; judge.py  judge-panel
   pipeline.py     the NO-BARRIER reactive driver — spawn sub-agents ON THE FLY as results
                   come back (run_reactive); no-barrier DAG execution (drive_graph)
@@ -86,7 +104,7 @@ ultracode/
   conductor.py    config.py    ledger.py   session-executive frame, knobs, run journal
   adapters.py     the only optional bridge to a host runtime (else pass your own call_fn)
   DOCTRINE.md     CONTRACTS.md the operating doctrine + the contracts gate
-tests/            119 tests, no live model (fakes injected)
+tests/            124 tests, no live model (fakes injected)
 bench/            the benchmark suite (code audit + research + corpus); reads its key from env
 REPORT.md         the full, honest engineering report — what works, what doesn't, and why
 ```

@@ -45,6 +45,7 @@ class UltracodeConfig:
     verify_default_refuted: bool = True  # the stance: uncertain -> refuted
     voi_verify: bool = True        # VOI triage: concentrate lenses where being wrong is costly (critical/high -> all, medium -> 2, low/info -> 1) — conservation of rigor, and a big cost cut at scale
     execution_verify: bool = False # ground-truth-once: RUN a repro to confirm findings (the only true exit from the closed loop). OFF by default — runs model-generated code; enable only for trusted/benchmark targets or behind a real sandbox
+    execution_assist: bool = False # execution as a REASONING aid: for search/enumeration/simulation/exact-arithmetic tasks, let the agent WRITE+RUN a program to compute the answer (the biggest cognitive lever for a weak model). The agent declines for pure-reasoning tasks. OFF by default (runs model code; enable for trusted/benchmark or behind a sandbox)
 
     # -- loop-until-dry discovery --
     discovery_max_rounds: int = 6

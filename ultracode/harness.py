@@ -204,6 +204,29 @@ def run(
         led.event("decision", {"orchestrate": decision.orchestrate, "shape": decision.shape.value,
                                 "reason": decision.reason, "kind": tkind})
 
+    # --- EXECUTION as a reasoning aid (AUGMENT, never replace) ----------------
+    # For computable tasks (systematic search / enumeration / simulation / exact
+    # arithmetic), the agent WRITES and RUNS a program — the runtime computes reliably
+    # what a weak model's reasoning slips on. But we do NOT short-circuit to the program's
+    # output (that lost completeness on multi-part tasks and mis-fired on explain tasks):
+    # instead we FOLD the computed value into the material as authoritative evidence, and
+    # let the normal reasoning flow give the complete answer + explanation (and override an
+    # obviously-wrong computation). The agent declines (NOT_COMPUTABLE) for pure reasoning.
+    compute_caps: List[str] = []
+    if cfg.execution_assist:
+        from ultracode.compute import computable_answer
+        comp = computable_answer(task, aux_call_fn=aux_call_fn, agent=agent, model=model)
+        if led:
+            led.event("compute", {"ran": comp.ran, "declined": comp.declined, "detail": comp.detail})
+        if comp.ran and comp.answer:
+            evidence = (
+                "\n\n[COMPUTED BY EXECUTION — a program was written and run; treat its output as authoritative "
+                "for the value(s) it determines, but you MUST still give the COMPLETE answer to every part the "
+                f"task asks, with reasoning]:\n{comp.answer}\n"
+            )
+            context = (context + evidence) if context else evidence.strip()
+            compute_caps = [f"execution evidence folded in (a program was run): {comp.answer[:80]}"]
+
     # GENERATIVE tasks use the judge-panel shape (N angles -> score -> graft), not find->verify
     if tkind == TaskKind.GENERATIVE and (decision.orchestrate or force_orchestrate):
         jr = judge_panel(task, context=context, n=cfg.max_finders, delegate_fn=delegate_fn,
@@ -224,7 +247,8 @@ def run(
             ],
             model=model, temperature=0.3, max_tokens=2000, main_runtime=rt, call_fn=aux_call_fn,
         )
-        res = UltracodeResult(task=task, mode="solo", answer=answer, decision=decision, stages=["solo"])
+        res = UltracodeResult(task=task, mode="solo", answer=answer, decision=decision, stages=["solo"],
+                              caps_announced=list(compute_caps))
         if led:
             led.event("done", res.summary())
         return res
@@ -261,8 +285,9 @@ def run(
             res = UltracodeResult(task=task, mode="discerned-solo", answer=solo_answer,
                                   decision=decision, stages=["solo-audit", "triage:solo"],
                                   findings=solo_findings,
-                                  caps_announced=[f"discernment: solo suffices (conf={tv.confidence:.2f}, "
-                                                  f"stakes={tv.stakes}); ensembling would add cost, not recall"])
+                                  caps_announced=list(compute_caps) + [
+                                      f"discernment: solo suffices (conf={tv.confidence:.2f}, "
+                                      f"stakes={tv.stakes}); ensembling would add cost, not recall"])
             if led:
                 led.event("done", res.summary())
             return res
@@ -304,7 +329,7 @@ def run(
         plan = Plan(subtasks=approach.subtasks, rationale=approach.reasoning, delegated=len(approach.subtasks) > 1)
     else:
         plan = make_plan(task, decision, context="", config=cfg, agent=agent, aux_call_fn=aux_call_fn, model=model)
-    caps = list(plan.caps_announced)
+    caps = list(compute_caps) + list(plan.caps_announced)
     if approach.ok:
         caps.append(f"agent-reasoned approach (shape={approach.shape}): {approach.reasoning[:140]}")
     if seed_findings:
