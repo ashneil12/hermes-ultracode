@@ -151,7 +151,8 @@ def research_corpus(
 
     tasks = [{"goal": _extract_prompt(question, c)} for c in chunks]
     results = delegate_fanout(tasks, parent_agent=agent, max_children=cfg.max_children,
-                              concurrency=concurrency, delegate_fn=delegate_fn, retry_empty=retry_empty)
+                              concurrency=concurrency, delegate_fn=delegate_fn, retry_empty=retry_empty,
+                              worker_model=cfg.worker_model)
     raw: List[Finding] = []
     for i, entry in enumerate(results):
         raw.extend(_parse(entry if isinstance(entry, dict) else {}, chunks[i % len(chunks)]))
@@ -330,7 +331,8 @@ def enumerate_corpus(
         progress(f"enumeration: {len(sections)} sections, concurrency {concurrency}, retry_empty {retry_empty}")
     tasks = [{"goal": _enumeration_prompt(instruction, s)} for s in sections]
     results = delegate_fanout(tasks, parent_agent=agent, max_children=cfg.max_children,
-                              concurrency=concurrency, delegate_fn=delegate_fn, retry_empty=retry_empty)
+                              concurrency=concurrency, delegate_fn=delegate_fn, retry_empty=retry_empty,
+                              worker_model=cfg.worker_model)
     _collect([str(e.get("summary") or "") for e in results if isinstance(e, dict)])
     dropped = len(sections) - res.chunks_covered
     res.caps_announced.append(

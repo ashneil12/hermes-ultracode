@@ -109,6 +109,8 @@ def delegate_fanout(
     concurrency: Optional[int] = None,
     delegate_fn: Optional[Callable[..., str]] = None,
     retry_empty: int = 0,
+    worker_model: Optional[str] = None,
+    raise_on_error: bool = False,
 ) -> List[Dict[str, Any]]:
     """Fan ``tasks`` out as parallel subagents, returning results ordered by a
     GLOBAL task_index.
@@ -136,9 +138,19 @@ def delegate_fanout(
     backends (the DeepSeek bench client; a fixed Hermes core) get true scale.
     Raising real-Hermes parallelism past the per-call cap is the upstream fix this
     surfaces.
+
+    ``worker_model`` pins a (typically cheaper) model on every task that doesn't already
+    carry its own — mechanical fan-out workers shouldn't burn the parent's reasoning model.
+    ``raise_on_error`` surfaces a backend error payload as a RuntimeError instead of degrading
+    it to an error entry; use it at small scope where a failed wave should fail loudly, and
+    leave it off at scale where one bad wave must not crash the other 99 (the default).
     """
     if not tasks:
         return []
+    if worker_model:
+        # worker_model is the DEFAULT; a task that set its own "model" key (any value, incl. "" / None
+        # meaning "use the backend default") keeps it — spreading t last lets an explicit key win.
+        tasks = [{"model": worker_model, **t} for t in tasks]
     fn = delegate_fn or _real_delegate_task
     cap = max(1, int(max_children))
 
@@ -197,6 +209,11 @@ def delegate_fanout(
                 e["task_index"] = slot
                 results[slot] = e
 
+    if raise_on_error:
+        bad = [e for e in results if isinstance(e, dict) and e.get("status") == "error"]
+        if bad:
+            raise RuntimeError(f"delegate_fanout: {len(bad)}/{len(results)} task(s) errored; "
+                               f"first: {bad[0].get('error', 'unknown')}")
     return results
 
 

@@ -196,3 +196,38 @@ def verify_findings(
 def survivors(findings: List[Finding]) -> List[Finding]:
     """The findings that survived adversarial verification."""
     return [f for f in findings if f.survived]
+
+
+def verify_to_convergence(
+    findings: List[Finding],
+    *,
+    rounds: int = 1,
+    config: Optional[UltracodeConfig] = None,
+    on_round: Optional[Callable[[int, int, int], None]] = None,
+    **verify_kw: Any,
+) -> List[Finding]:
+    """Iterated refutation (teknium's adversarial convergence). Run ``verify_findings`` up to ``rounds``
+    times; after round 1, RE-CHALLENGE only the current survivors with a FRESH independent skeptic pass.
+    A finding must survive EVERY round to be kept — one pass can rubber-stamp a plausible-but-wrong claim;
+    independent re-refutation breaks that. Converges early when a round drops nothing new. Returns the
+    SAME (mutated) finding objects; survivors are ``[f for f in findings if f.survived]``.
+
+    ``on_round(round_index, n_challenged, n_survived)`` is an optional progress callback.
+    """
+    cfg = config or UltracodeConfig()
+    rounds = max(1, int(rounds))
+    verify_findings(findings, config=cfg, **verify_kw)  # round 1: challenge all
+    alive = survivors(findings)
+    if on_round:
+        on_round(1, len(findings), len(alive))
+    for r in range(2, rounds + 1):
+        if not alive:
+            break
+        before = len(alive)
+        verify_findings(alive, config=cfg, **verify_kw)  # fresh independent pass over survivors
+        alive = survivors(alive)
+        if on_round:
+            on_round(r, before, len(alive))
+        if len(alive) == before:
+            break  # converged: a full round refuted nothing -> stable
+    return findings

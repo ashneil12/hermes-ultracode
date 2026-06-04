@@ -8,7 +8,7 @@ Enabling ultracode does two things to the live agent, both reversible:
      directive is byte-stable across turns, so it stays cache-safe.
 
 The directive is the *standing default*; the real enforcement lives in the
-ultracode harness (the structure the model can't bypass). This is the
+agent/ultracode harness (the structure the model can't bypass). This is the
 "flip the behavior" surface — `/ultracode [on|off|status]`.
 """
 
@@ -34,6 +34,12 @@ ULTRACODE_DIRECTIVE = (
     "reasoning is never a substitute for checking. "
     "(6) SYNTHESIZE solo, lead with the load-bearing result, present only verified findings as fact, "
     "rank and compress, surface the strongest refuted objection as a minority report. "
+    "(7) When the fan-out is LARGE and the split is scriptable (codebase-wide sweep, 100+ unit migration, "
+    "multi-source research), reach for the `dynamic-workflow` skill — plan-in-code so the loop and "
+    "intermediate exhaust live in a script and your context holds only the final verified answer; do the "
+    "DETERMINISTIC part (list/parse/fetch) first, then fan out only the irreducibly-LLM step. "
+    "COST DISCIPLINE: prove the recipe on a SCOPED slice, report its token cost, then offer full scale — "
+    "never silently fan out hundreds of children. "
     "STAY SOLO on trivial/coupled/voice/conversational work — if you can't name what a second worker adds, use one. "
     "Never fan out over an unreproduced failure. Never silently cap. A green is evidence, not a conclusion."
 )
