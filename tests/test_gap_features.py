@@ -269,3 +269,106 @@ def test_ultrathink_no_false_match_on_substrings():
     # "rethink"/"ultrathinking" must not trigger (whole-word)
     assert parse_effort_keywords("let me rethink and keep ultrathinking") == \
         ("let me rethink and keep ultrathinking", None)
+
+
+# ---- run() wiring: durable hand-off + resume ----
+
+def _orchestrate_fakes(finder_summary="[]"):
+    """aux (planner/synth, tools-off) + delegate (finder/verify fan-out) fakes for run()."""
+    def aux(**kwargs):
+        return "FINAL: synthesized answer"
+
+    calls = {"delegate": 0}
+
+    def delegate(*, tasks, parent_agent=None, role="leaf"):
+        calls["delegate"] += 1
+        return json.dumps({"results": [{"task_index": i, "status": "completed", "summary": finder_summary}
+                                       for i in range(len(tasks))]})
+    return aux, delegate, calls
+
+
+def test_durable_dispatch_hands_off_and_does_not_execute_in_turn(monkeypatch):
+    from ultracode import harness, durable
+    from ultracode.durable import SwarmHandle
+
+    monkeypatch.setattr(durable, "kanban_available", lambda: True)
+    captured = {}
+
+    def fake_persist(goal, subtasks, **kw):
+        captured.update(goal=goal, n=len(subtasks), kw=kw)
+        return SwarmHandle(root_id="root-9", worker_ids=["w0", "w1"], verifier_id="v", synthesizer_id="s", raw={})
+    monkeypatch.setattr(durable, "persist_as_swarm", fake_persist)
+
+    aux, delegate, calls = _orchestrate_fakes()
+    res = harness.run("audit this module for bugs", force_orchestrate=True, enable_ledger=False,
+                      aux_call_fn=aux, delegate_fn=delegate, durable_conn=object())
+
+    assert res.mode == "durable"
+    assert res.swarm is not None and res.swarm.root_id == "root-9"
+    assert calls["delegate"] == 0          # CRITICAL: no in-turn execution -> no double-run
+    assert any("DURABLE" in c for c in res.caps_announced)
+    assert captured["kw"]["verifier_assignee"]  # assignees threaded from config
+
+
+def test_durable_requested_but_host_lacks_kanban_runs_in_turn(monkeypatch):
+    from ultracode import harness, durable
+    monkeypatch.setattr(durable, "kanban_available", lambda: False)
+
+    aux, delegate, calls = _orchestrate_fakes()
+    res = harness.run("audit this module", force_orchestrate=True, enable_ledger=False,
+                      aux_call_fn=aux, delegate_fn=delegate, durable_conn=object())
+    assert res.mode != "durable"            # fell back to the in-turn path
+    assert calls["delegate"] >= 1           # it actually executed
+    assert any("lacks the kanban" in c for c in res.caps_announced)
+
+
+def test_resume_carries_prior_findings_into_the_run(tmp_path):
+    from ultracode import harness
+    from ultracode.ledger import RunLedger
+    led_path = tmp_path / "rrun.jsonl"
+    RunLedger("rrun", path=led_path).finding(Finding(claim="prior bug", locator="old.py:7"))
+
+    aux, delegate, _ = _orchestrate_fakes(finder_summary="[]")  # finders find nothing new
+    res = harness.run("audit", force_orchestrate=True, run_id="rrun", ledger_path=str(led_path),
+                      resume=True, aux_call_fn=aux, delegate_fn=delegate)
+    assert any("resumed: seeded with 1" in c for c in res.caps_announced)
+    assert any(f.claim == "prior bug" for f in res.findings)   # prior work carried, not lost
+
+
+def test_resume_does_not_inflate_agreement_when_finder_refinds(tmp_path):
+    # REGRESSION (review): a live finder re-reporting a resumed claim must NOT sum its agreement_count
+    from ultracode import harness
+    from ultracode.ledger import RunLedger
+    led_path = tmp_path / "rr2.jsonl"
+    RunLedger("rr2", path=led_path).finding(Finding(claim="same bug", locator="x.py:1", agreement_count=3))
+
+    # finder re-emits the SAME claim+locator (a JSON finding the harness will parse)
+    refind = json.dumps([{"claim": "same bug", "locator": "x.py:1", "evidence": "again"}])
+    aux, delegate, _ = _orchestrate_fakes(finder_summary=refind)
+    res = harness.run("audit this code for the same bug", force_orchestrate=True, run_id="rr2",
+                      ledger_path=str(led_path), resume=True, aux_call_fn=aux, delegate_fn=delegate)
+    same = [f for f in res.findings if f.locator == "x.py:1"]
+    assert len(same) == 1
+    assert same[0].agreement_count == 3   # NOT 4+ — the resumed count is preserved, not re-summed
+
+
+def test_durable_skip_announced_on_solo_path(monkeypatch):
+    # REGRESSION (review): durable_conn set but task resolves to a bounded shape must FAIL LOUD
+    from ultracode import harness, durable
+    monkeypatch.setattr(durable, "kanban_available", lambda: True)
+
+    def aux(**kwargs):
+        # triage: solo suffices (no gaps, low stakes) -> discerned-solo early-return
+        return json.dumps({"orchestrate": False, "stakes": "low", "gaps": [], "confidence": 0.9,
+                           "reason": "trivial", "findings": []})
+
+    persist_calls = {"n": 0}
+    monkeypatch.setattr(durable, "persist_as_swarm",
+                        lambda *a, **k: persist_calls.__setitem__("n", persist_calls["n"] + 1))
+
+    # NOT force_orchestrate -> discernment runs -> solo; durable must be announced as skipped, not silent
+    res = harness.run("summarize this", context="short", enable_ledger=False,
+                      aux_call_fn=aux, delegate_fn=lambda **k: '{"results":[]}', durable_conn=object())
+    assert res.mode in ("solo", "discerned-solo")
+    assert persist_calls["n"] == 0                                  # nothing persisted (no double-run)
+    assert any("durable requested" in c and "resolved to" in c for c in res.caps_announced)  # fail loud

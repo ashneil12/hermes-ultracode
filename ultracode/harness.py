@@ -45,11 +45,13 @@ class UltracodeResult:
     survivors: List[Finding] = field(default_factory=list)
     caps_announced: List[str] = field(default_factory=list)
     stages: List[str] = field(default_factory=list)
+    swarm: Optional[Any] = None  # set only in durable mode: the kanban SwarmHandle this run dispatched to
 
     def __post_init__(self):
         # one guard where ALL answer-producing paths converge (solo, judge fallback,
         # synthesis): a blank answer is a real degradation, never silently confident.
-        if not (self.answer or "").strip():
+        # A durable hand-off legitimately has no in-turn answer yet (the swarm produces it later).
+        if not (self.answer or "").strip() and self.swarm is None:
             self.caps_announced.append("WARNING: empty answer produced (all upstream paths degraded)")
 
     def summary(self) -> dict:
@@ -189,6 +191,8 @@ def run(
     ledger_path: Optional[str] = None,
     kind: str = "auto",
     verify_delegate_fn: Optional[Callable[..., str]] = None,
+    resume: bool = False,
+    durable_conn: Any = None,
 ) -> UltracodeResult:
     # discover cheap, VERIFY STRONG: the hermes verification proved weak skeptics
     # "confirm" false positives. A stronger backend (or execution arbiter) for the
@@ -197,6 +201,26 @@ def run(
     cfg = config or UltracodeConfig()
     led = RunLedger(run_id, path=ledger_path) if enable_ledger else None
     rt = runtime_from_agent(agent)
+
+    # RESUME: rebuild what a prior (interrupted) run with this run_id already found, so we don't
+    # re-derive it. The findings are prepended to the orchestration seed below; their dedup_keys then
+    # prime the loop-until-dry seen-set automatically (the seen-set is derived from the seed).
+    resume_findings: List[Finding] = []
+    if resume and led:
+        rstate = led.resume_state()
+        resume_findings = rstate["findings"]
+        if rstate["resumed"]:
+            led.event("resume", {"findings": len(resume_findings)})
+
+    # Durable hand-off (below) only fires on the ORCHESTRATED fan-out path. If the run resolves to a
+    # bounded in-turn shape (solo / discerned-solo / judge-panel), there is no long fan-out to persist
+    # and nothing is dispatched to kanban — but the caller passed a connection EXPECTING durability, so
+    # we must say so rather than silently ignore it (fail loud, never a silent skip).
+    def _durable_skipped(shape: str) -> List[str]:
+        if durable_conn is None:
+            return []
+        return [f"durable requested (durable_conn set) but the task resolved to '{shape}' — a bounded "
+                f"in-turn shape; durability applies to the orchestrated fan-out path. Ran in-turn."]
 
     decision = decide(task, cfg, force_orchestrate=force_orchestrate)
     tkind = kind if kind != "auto" else classify_kind(task, context)
@@ -233,7 +257,8 @@ def run(
                          aux_call_fn=aux_call_fn, config=cfg, agent=agent, model=model)
         res = UltracodeResult(task=task, mode="judge-panel", answer=jr.answer, decision=decision,
                               stages=["judge-panel"],
-                              caps_announced=[f"judge-panel: {len(jr.candidates)} candidates from distinct angles; winner={jr.winner_angle}"])
+                              caps_announced=[f"judge-panel: {len(jr.candidates)} candidates from distinct angles; winner={jr.winner_angle}"]
+                              + _durable_skipped("judge-panel"))
         if led:
             led.event("done", res.summary())
         return res
@@ -248,7 +273,7 @@ def run(
             model=model, temperature=0.3, max_tokens=2000, main_runtime=rt, call_fn=aux_call_fn,
         )
         res = UltracodeResult(task=task, mode="solo", answer=answer, decision=decision, stages=["solo"],
-                              caps_announced=list(compute_caps))
+                              caps_announced=list(compute_caps) + _durable_skipped("solo"))
         if led:
             led.event("done", res.summary())
         return res
@@ -287,7 +312,8 @@ def run(
                                   findings=solo_findings,
                                   caps_announced=list(compute_caps) + [
                                       f"discernment: solo suffices (conf={tv.confidence:.2f}, "
-                                      f"stakes={tv.stakes}); ensembling would add cost, not recall"])
+                                      f"stakes={tv.stakes}); ensembling would add cost, not recall"]
+                                  + _durable_skipped("discerned-solo"))
             if led:
                 led.event("done", res.summary())
             return res
@@ -319,7 +345,8 @@ def run(
                          aux_call_fn=aux_call_fn, config=cfg, agent=agent, model=model)
         res = UltracodeResult(task=task, mode="judge-panel", answer=jr.answer, decision=decision,
                               stages=pre_stages + ["approach", "judge-panel"],
-                              caps_announced=[f"agent chose judge-panel; winner={jr.winner_angle}"])
+                              caps_announced=[f"agent chose judge-panel; winner={jr.winner_angle}"]
+                              + _durable_skipped("judge-panel"))
         if led:
             led.event("done", res.summary())
         return res
@@ -336,6 +363,49 @@ def run(
         caps.append(f"discernment: escalated, seeded orchestration with {len(seed_findings)} solo finding(s)")
     if led:
         led.event("plan", {"n_subtasks": len(plan.subtasks), "delegated": plan.delegated, "rationale": plan.rationale})
+
+    # DURABLE HAND-OFF: if the host gave us a kanban connection (and ships the swarm kernel), dispatch
+    # the planned work to a durable swarm and RETURN — we must NOT also execute it in-turn, or the
+    # kanban dispatcher would double-run it. The swarm (root→workers→verifier→synthesizer, SQLite-backed)
+    # survives /stop+/new and resumes; results accrue on its blackboard, read back by the host later.
+    if durable_conn is not None and plan.subtasks:
+        from ultracode.durable import kanban_available, persist_as_swarm
+        if kanban_available():
+            handle = persist_as_swarm(
+                task, plan.subtasks, conn=durable_conn,
+                verifier_assignee=cfg.swarm_verifier_assignee,
+                synthesizer_assignee=cfg.swarm_synthesizer_assignee,
+                worker_profile=cfg.swarm_worker_profile)
+            note = (f"DURABLE: dispatched {len(plan.subtasks)} workers to kanban swarm root={handle.root_id} "
+                    f"(survives interruption; results accrue on the swarm blackboard — read them back via "
+                    f"the kanban kernel, not this turn)")
+            caps.append(note)
+            if resume_findings:
+                # the swarm re-runs the full plan; prior in-turn findings are NOT seeded into it.
+                # carry them onto the result so the host doesn't lose them, and say so.
+                caps.append(f"NOTE: {len(resume_findings)} prior finding(s) from a resumed in-turn run are "
+                            f"carried on this result but NOT seeded into the durable swarm (the swarm re-runs "
+                            f"the full plan); reconcile them with the swarm's output when it completes")
+            if led:
+                led.event("durable_dispatch", {"root_id": handle.root_id, "workers": len(handle.worker_ids)})
+            return UltracodeResult(task=task, mode="durable", answer="", decision=decision, plan=plan,
+                                   findings=list(resume_findings), caps_announced=caps,
+                                   stages=pre_stages + ["plan", "durable-dispatch"], swarm=handle)
+        caps.append("durable requested but host lacks the kanban swarm kernel — ran in-turn instead")
+
+    # RESUME: the prior findings are merged back AFTER the discovery branch (see _carry_resume below),
+    # NOT injected into seed_findings here. Injecting would let a live finder that re-reports a resumed
+    # claim get SUMMED into it by dedupe_findings (inflating agreement_count on every resume — the very
+    # thing resume_state's max-dedup prevents). resume_seen primes discovery's seen-set so the loop
+    # doesn't waste effort re-finding them; _carry_resume then prepends them and drops any live dup.
+    resume_seen = {f.dedup_key() for f in resume_findings}
+    if resume_findings:
+        caps.append(f"resumed: seeded with {len(resume_findings)} finding(s) from a prior run of '{run_id}'")
+
+    def _carry_resume(found: List[Finding]) -> List[Finding]:
+        if not resume_findings:
+            return found
+        return resume_findings + [f for f in found if f.dedup_key() not in resume_seen]
 
     # research depth: when the agent reasoned out its OWN worker_directive, trust it
     # (the plan_approach meta-prompt already teaches depth-per-slice). Only inject the
@@ -398,7 +468,8 @@ def run(
         if led:
             led.event("stream_discovery", {"dispatched": rep["dispatched"], "spawned": rep["spawned"], "peak": rep["peak"]})
     elif effective_loop:
-        report = discover(finder_round, config=cfg, seen_keys={f.dedup_key() for f in seed_findings})
+        report = discover(finder_round, config=cfg,
+                          seen_keys={f.dedup_key() for f in seed_findings} | resume_seen)
         findings = dedupe_findings(seed_findings + report.findings)
         caps.extend(report.caps_announced)
         stages = pre_stages + ["plan", f"discover(loop, {report.rounds_run} rounds, {report.stop_reason})"]
@@ -415,6 +486,9 @@ def run(
                         f"but capped to a single light wave by the cost gate (context "
                         f"{len(context)} < full_orchestration_min_chars {cfg.full_orchestration_min_chars}, "
                         f"or stakes below threshold); raise the gate or stakes to loop")
+
+    # carry resumed findings back in (prepended; any live dup dropped so agreement_count isn't re-summed)
+    findings = _carry_resume(findings)
 
     # root-cause reconciliation: collapse near-duplicate findings (over-generation)
     if cfg.reconcile:

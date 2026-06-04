@@ -64,6 +64,14 @@ class UltracodeConfig:
     # the strong model. A direct, large cost cut at scale; applied unless a task pins its own model.
     worker_model: Optional[str] = None
 
+    # -- durability. When run(durable_conn=<kanban sqlite conn>) is given AND the host ships the kanban
+    # swarm, an orchestrated run is DISPATCHED to a durable swarm (root→workers→verifier→synthesizer,
+    # SQLite-backed, survives /stop+/new and resumes) instead of executing in-turn — so it can't both
+    # persist AND double-run. These name the agent profiles the swarm assigns its verifier/synth cards.
+    swarm_verifier_assignee: str = "ultracode-verifier"
+    swarm_synthesizer_assignee: str = "ultracode-synthesizer"
+    swarm_worker_profile: str = "leaf"
+
     # -- scale-to-the-ask --
     solo_by_default: bool = True   # restraint: orchestrate only on a real signal
     discernment: bool = True       # DISCERNMENT: solo-first, escalate to orchestration only if a quick triage says it would materially help (the fix for "always full-metal")
