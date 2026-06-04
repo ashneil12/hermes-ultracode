@@ -1,0 +1,24 @@
+{
+ "rows": [
+  {
+   "n_sents": 100,
+   "gold": 125,
+   "recall": 0.92
+  },
+  {
+   "n_sents": 400,
+   "gold": 487,
+   "recall": 0.825
+  },
+  {
+   "n_sents": 1000,
+   "gold": 970,
+   "recall": 0.395
+  },
+  {
+   "n_sents": 2000,
+   "gold": 1619,
+   "recall": 0.234
+  }
+ ]
+}

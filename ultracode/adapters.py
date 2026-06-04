@@ -87,6 +87,19 @@ def _strip_trailing_commas(s: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def is_empty_result(entry: Any) -> bool:
+    """A fan-out result counts as a FAILURE (worth retrying) when it errored or came
+    back with no usable text. The second case is the silent one: a reasoning-model
+    worker can burn its whole token budget thinking and return ``finish_reason=length``
+    with EMPTY content — the host marks it however it likes, but there is nothing to
+    union. Treat any non-completed status or blank summary as empty."""
+    if not isinstance(entry, dict):
+        return True
+    if entry.get("status") != "completed":
+        return True
+    return not str(entry.get("summary") or "").strip()
+
+
 def delegate_fanout(
     tasks: List[Dict[str, Any]],
     *,
@@ -95,6 +108,9 @@ def delegate_fanout(
     max_children: int = 3,
     concurrency: Optional[int] = None,
     delegate_fn: Optional[Callable[..., str]] = None,
+    retry_empty: int = 0,
+    worker_model: Optional[str] = None,
+    raise_on_error: bool = False,
 ) -> List[Dict[str, Any]]:
     """Fan ``tasks`` out as parallel subagents, returning results ordered by a
     GLOBAL task_index.
@@ -107,6 +123,14 @@ def delegate_fanout(
         exceeds ``max_children`` we dispatch multiple waves CONCURRENTLY, so a
         backend that caps each call at 3 can still run 100 agents at once.
 
+    ``retry_empty`` (default 0) re-dispatches ONLY the tasks whose result came back
+    empty/errored (see ``is_empty_result``), up to this many extra rounds. This is the
+    fix for the silent coverage hole: a flaky or token-starved worker would otherwise
+    drop its whole chunk from the union with no error, capping recall. Retrying just the
+    holes is cheap (you don't re-run the workers that succeeded) and idempotent. A
+    coverage fan-out — where every dropped chunk is lost recall — should set this; a
+    best-effort find-all that tolerates a missing chunk can leave it 0.
+
     ⚠️ Concurrent waves call ``delegate_fn`` from multiple threads. The REAL
     Hermes ``delegate_task`` is NOT safe under that (it mutates the process-global
     ``model_tools._last_resolved_tool_names`` — see CONTRACTS.md §1), so against
@@ -114,48 +138,82 @@ def delegate_fanout(
     backends (the DeepSeek bench client; a fixed Hermes core) get true scale.
     Raising real-Hermes parallelism past the per-call cap is the upstream fix this
     surfaces.
+
+    ``worker_model`` pins a (typically cheaper) model on every task that doesn't already
+    carry its own — mechanical fan-out workers shouldn't burn the parent's reasoning model.
+    ``raise_on_error`` surfaces a backend error payload as a RuntimeError instead of degrading
+    it to an error entry; use it at small scope where a failed wave should fail loudly, and
+    leave it off at scale where one bad wave must not crash the other 99 (the default).
     """
     if not tasks:
         return []
+    if worker_model:
+        # worker_model is the DEFAULT; a task that set its own "model" key (any value, incl. "" / None
+        # meaning "use the backend default") keeps it — spreading t last lets an explicit key win.
+        tasks = [{"model": worker_model, **t} for t in tasks]
     fn = delegate_fn or _real_delegate_task
     cap = max(1, int(max_children))
-    waves = [(base, tasks[base : base + cap]) for base in range(0, len(tasks), cap)]
 
-    def run_wave(base_wave):
-        base, wave = base_wave
-        try:
-            parsed = _parse_delegate_result(fn(tasks=wave, parent_agent=parent_agent, role=role))
-        except Exception as exc:
-            # one wave's backend error must not crash the other 99 at scale — degrade it
-            # to per-task error entries so the rest of the fan-out completes.
-            return [{"task_index": base + local, "status": "error", "summary": None,
-                     "error": f"delegate wave failed: {exc}"} for local in range(len(wave))]
-        entries: List[Dict[str, Any]] = []
-        for local in range(len(wave)):
-            entry = parsed[local] if local < len(parsed) and isinstance(parsed[local], dict) else None
-            if entry is None:
-                entries.append({"task_index": base + local, "status": "error", "summary": None,
-                                "error": "missing/invalid result for task"})
-                continue
-            e = dict(entry)
-            li = e.get("task_index", local)
-            e["task_index"] = base + (li if isinstance(li, int) and 0 <= li < len(wave) else local)
-            entries.append(e)
-        return entries
+    def _dispatch(task_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Run one full fan-out over ``task_list``; results aligned to its order (0..n-1)."""
+        waves = [(base, task_list[base : base + cap]) for base in range(0, len(task_list), cap)]
 
-    if concurrency is None or concurrency <= cap or len(waves) <= 1:
-        results: List[Dict[str, Any]] = []
-        for w in waves:
-            results.extend(run_wave(w))
-    else:
-        from concurrent.futures import ThreadPoolExecutor
+        def run_wave(base_wave):
+            base, wave = base_wave
+            try:
+                parsed = _parse_delegate_result(fn(tasks=wave, parent_agent=parent_agent, role=role))
+            except Exception as exc:
+                # one wave's backend error must not crash the other 99 at scale — degrade it
+                # to per-task error entries so the rest of the fan-out completes.
+                return [{"task_index": base + local, "status": "error", "summary": None,
+                         "error": f"delegate wave failed: {exc}"} for local in range(len(wave))]
+            entries: List[Dict[str, Any]] = []
+            for local in range(len(wave)):
+                entry = parsed[local] if local < len(parsed) and isinstance(parsed[local], dict) else None
+                if entry is None:
+                    entries.append({"task_index": base + local, "status": "error", "summary": None,
+                                    "error": "missing/invalid result for task"})
+                    continue
+                e = dict(entry)
+                li = e.get("task_index", local)
+                e["task_index"] = base + (li if isinstance(li, int) and 0 <= li < len(wave) else local)
+                entries.append(e)
+            return entries
 
-        wave_workers = max(1, min(len(waves), -(-int(concurrency) // cap)))  # ceil(concurrency/cap)
-        with ThreadPoolExecutor(max_workers=wave_workers) as ex:
-            collected = list(ex.map(run_wave, waves))
-        results = [e for wave_entries in collected for e in wave_entries]
+        if concurrency is None or concurrency <= cap or len(waves) <= 1:
+            out: List[Dict[str, Any]] = []
+            for w in waves:
+                out.extend(run_wave(w))
+        else:
+            from concurrent.futures import ThreadPoolExecutor
 
-    results.sort(key=lambda e: e.get("task_index", 0))
+            wave_workers = max(1, min(len(waves), -(-int(concurrency) // cap)))  # ceil(concurrency/cap)
+            with ThreadPoolExecutor(max_workers=wave_workers) as ex:
+                collected = list(ex.map(run_wave, waves))
+            out = [e for wave_entries in collected for e in wave_entries]
+        out.sort(key=lambda e: e.get("task_index", 0))
+        return out
+
+    results = _dispatch(tasks)
+
+    # Re-dispatch only the holes (empty/errored), up to retry_empty rounds. Cheap: we
+    # never re-run the workers that already produced a usable result.
+    for _ in range(max(0, int(retry_empty))):
+        holes = [i for i, e in enumerate(results) if is_empty_result(e)]
+        if not holes:
+            break
+        retried = _dispatch([tasks[i] for i in holes])
+        for slot, e in zip(holes, retried):
+            if not is_empty_result(e):
+                e = dict(e)
+                e["task_index"] = slot
+                results[slot] = e
+
+    if raise_on_error:
+        bad = [e for e in results if isinstance(e, dict) and e.get("status") == "error"]
+        if bad:
+            raise RuntimeError(f"delegate_fanout: {len(bad)}/{len(results)} task(s) errored; "
+                               f"first: {bad[0].get('error', 'unknown')}")
     return results
 
 
@@ -202,17 +260,31 @@ def aux_call(
     Used by the planner, the synthesis step, and (single-threaded) critic.
     Tools are always None here by design — these are reasoning calls, not
     tool-using agents (delegate_fanout is the tool-using path).
+
+    ADAPTIVE BUDGET: a reasoning model can spend the whole ``max_tokens`` on its
+    internal thinking and return EMPTY content (``finish_reason=length``). When a
+    call comes back blank but we asked for a bounded budget, we retry once with a
+    doubled budget before giving up — so plan/synthesis/critic don't silently
+    collapse to "" on a reasoning backend. (No budget set → no escalation; a
+    genuinely empty answer just returns "".)
     """
     fn = call_fn or _real_call_llm
-    resp = fn(
-        messages=messages,
-        model=model,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        tools=None,
-        main_runtime=main_runtime,
-    )
-    return _content_of(resp)
+
+    def _one(mt: Optional[int]) -> str:
+        return _content_of(fn(
+            messages=messages, model=model, temperature=temperature,
+            max_tokens=mt, tools=None, main_runtime=main_runtime,
+        ))
+
+    text = _one(max_tokens)
+    budget = max_tokens
+    # escalate only when we imposed a ceiling and got nothing back (the length-starve case)
+    for _ in range(2):
+        if text.strip() or not budget:
+            break
+        budget = int(budget) * 2
+        text = _one(budget)
+    return text
 
 
 def _content_of(resp: Any) -> str:

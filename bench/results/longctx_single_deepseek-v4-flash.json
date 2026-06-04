@@ -1,0 +1,26 @@
+{
+ "dense": true,
+ "rows": [
+  {
+   "n_docs": 30,
+   "recall": 1.0,
+   "precision": 1.0,
+   "found": 30,
+   "gt": 30
+  },
+  {
+   "n_docs": 90,
+   "recall": 1.0,
+   "precision": 1.0,
+   "found": 90,
+   "gt": 90
+  },
+  {
+   "n_docs": 180,
+   "recall": 1.0,
+   "precision": 1.0,
+   "found": 180,
+   "gt": 180
+  }
+ ]
+}

@@ -112,6 +112,8 @@ def research_corpus(
     max_chunk_lines: int = 300,
     top_k_chunks: Optional[int] = None,
     concurrency: int = 24,
+    retry_empty: int = 1,
+    single_pass_chars: int = 0,
     verify: bool = False,
     synthesize: bool = True,
     progress: Optional[Callable[[str], None]] = None,
@@ -135,13 +137,22 @@ def research_corpus(
         res.caps_announced.append(
             f"retrieval: read top {top_k_chunks} of {res.n_chunks} chunks by relevance; "
             f"{skipped} lower-relevance chunks skipped (ANNOUNCED, not silent)")
+    # FITS-ONE-PASS GUARD: when the whole (post-retrieval) corpus fits a single read, do ONE
+    # combined extraction instead of fanning out. Chunking fragments evidence that must be CHAINED
+    # across sections (multi-hop), so the union of per-chunk reads underperforms a direct read when
+    # there's no coverage pressure — discernment at the corpus level. Opt-in (0 = always fan out).
+    if single_pass_chars and sum(len(c.text) for c in chunks) <= single_pass_chars:
+        chunks = [Chunk(path="<combined>", start=1, text="\n\n".join(c.text for c in chunks))]
+        res.caps_announced.append(
+            "single-pass: corpus fits one read; combined extraction (no cross-section fragmentation)")
     res.chunks_read = len(chunks)
     if progress:
         progress(f"extracting from {len(chunks)} chunks / {res.n_files} files (concurrency {concurrency})")
 
     tasks = [{"goal": _extract_prompt(question, c)} for c in chunks]
     results = delegate_fanout(tasks, parent_agent=agent, max_children=cfg.max_children,
-                              concurrency=concurrency, delegate_fn=delegate_fn)
+                              concurrency=concurrency, delegate_fn=delegate_fn, retry_empty=retry_empty,
+                              worker_model=cfg.worker_model)
     raw: List[Finding] = []
     for i, entry in enumerate(results):
         raw.extend(_parse(entry if isinstance(entry, dict) else {}, chunks[i % len(chunks)]))
@@ -176,4 +187,158 @@ def research_corpus(
             res.caps_announced.append(
                 f"prose synthesis is lossy at scale ({len(findings)} findings); appended the complete "
                 f"deduped union as the authoritative list (no findings dropped)")
+    return res
+
+
+# ---------------------------------------------------------------------------
+# EXHAUSTIVE ENUMERATION — the map-reduce-union coverage primitive.
+#
+# research_corpus is tuned for "surface the NOTABLE things": each worker emits a
+# capped JSON findings list, reconciled by salience. That structurally under-recovers
+# a TOTAL-COVERAGE ask ("list EVERY entity / endpoint / call-site / symbol"), where the
+# answer is a flat exhaustive set and the only job is to miss nothing. This primitive is
+# the right shape for that: chunk -> fan out one raw ENUMERATOR per chunk (plain one-per-
+# line text, no JSON bottleneck, generous token budget) -> union + dedupe. retry_empty
+# refills any chunk a flaky/token-starved worker dropped, so a hole can't silently cap
+# recall. And it routes a corpus that fits ONE pass to a single read (no lossy fan-out
+# when there's no coverage benefit — discernment at the corpus level).
+# ---------------------------------------------------------------------------
+
+_BULLET = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s*")
+# a "LABEL: value" prefix the worker sometimes adds (PERSON:, LOCATION:, ORG:, Entity:) — keep the value
+_LABEL = re.compile(r"^(?:[A-Z][A-Za-z]{1,14}|[A-Z]{2,6})\s*:\s*(?=\S)")
+# conversational scaffolding that is not an item (bare category headers are caught by the trailing-colon
+# rule instead, so this stays focused on non-colon framing and doesn't eat a real "PERSON: value")
+_FRAMING = re.compile(
+    r"^(here (are|is)|the following|these are|list of|that('| i)s all|in summary|"
+    r"no (other|further|more)\b|i (found|could|will)|sure[,!]|okay\b)",
+    re.IGNORECASE)
+
+
+@dataclass
+class EnumerationResult:
+    instruction: str = ""
+    items: List[str] = field(default_factory=list)   # deduped, in first-seen order
+    n_chunks: int = 0
+    chunks_covered: int = 0                            # chunks that returned usable output
+    single_pass: bool = False                          # corpus fit one read -> no fan-out
+    caps_announced: List[str] = field(default_factory=list)
+
+
+def _enumeration_prompt(instruction: str, text: str) -> str:
+    return (
+        f"List EVERY {instruction} mentioned anywhere in the text below. Output ONLY a plain list, "
+        "one item per line — no numbering, no commentary, no grouping, no markdown. Be exhaustive: "
+        "include every distinct item, do not stop early, do not summarize.\n\n"
+        f"=== TEXT ===\n{text}"
+    )
+
+
+def _split_inline_list(s: str) -> List[str]:
+    """A worker sometimes lists items comma/semicolon-separated on ONE line, which would otherwise
+    collapse to a single 'item' and crater recall. Split only when it clearly IS a list — 3+ pieces,
+    each a short 1-3 word name — so a single entity that legitimately contains a comma ('Smith, John',
+    'New York, NY') is left intact (2 pieces, or long pieces -> no split)."""
+    if ";" in s:
+        parts = [p.strip() for p in s.split(";")]
+    elif s.count(",") >= 2:
+        parts = [p.strip() for p in s.split(",")]
+    else:
+        return [s]
+    parts = [p for p in parts if p]
+    if len(parts) >= 3 and all(0 < len(p) <= 40 and len(p.split()) <= 3 for p in parts):
+        return parts
+    return [s]
+
+
+def _parse_items(text: str) -> List[str]:
+    out = []
+    for line in (text or "").splitlines():
+        s = _BULLET.sub("", line).strip().strip("*#`").strip().strip("\"'").strip()
+        if not s or len(s) > 200:
+            continue
+        s = _LABEL.sub("", s).strip()  # strip a "PERSON:"/"ORG:" prefix FIRST, keep the value
+        if s.lower() in ("none", "n/a", "na", "(none)") or s.endswith(":"):
+            continue  # blanks, 'none', and bare header lines ("Entities:")
+        if _FRAMING.match(s):
+            continue  # conversational scaffolding ("Here are the entities", "That's all")
+        for item in _split_inline_list(s):
+            item = item.strip().strip("*#`").strip()
+            if item and item.lower() not in ("none", "n/a", "na"):
+                out.append(item)
+    return out
+
+
+def enumerate_corpus(
+    sections: List[str],
+    instruction: str,
+    *,
+    delegate_fn: Optional[Callable[..., str]] = None,
+    aux_call_fn: Optional[Callable[..., Any]] = None,
+    config: Optional[UltracodeConfig] = None,
+    agent: Any = None,
+    concurrency: int = 16,
+    retry_empty: int = 2,
+    normalize: Optional[Callable[[str], str]] = None,
+    single_pass_chars: int = 12000,
+    progress: Optional[Callable[[str], None]] = None,
+) -> EnumerationResult:
+    """Exhaustively enumerate ``instruction`` items across pre-chunked ``sections``.
+
+    Each section becomes one raw enumerator subagent; their line-lists are unioned and
+    deduped (case/whitespace-insensitive by default, or via ``normalize``). ``retry_empty``
+    refills dropped chunks. If the whole corpus fits ``single_pass_chars`` it does ONE read
+    instead of fanning out (avoids the fan-out's overhead/fragmentation when one pass suffices).
+    """
+    cfg = config or UltracodeConfig()
+    norm = normalize or (lambda s: " ".join(s.lower().split()))
+    res = EnumerationResult(instruction=instruction, n_chunks=len(sections))
+    sections = [s for s in sections if s and s.strip()]
+    if not sections:
+        res.caps_announced.append("no non-empty sections supplied")
+        return res
+
+    def _collect(raw_outputs: List[str]) -> None:
+        seen, covered = {}, 0
+        for out in raw_outputs:
+            if out and out.strip():
+                covered += 1
+            for item in _parse_items(out):
+                key = norm(item)
+                if key and key not in seen:
+                    seen[key] = item
+        res.items = list(seen.values())
+        res.chunks_covered = covered
+
+    total_chars = sum(len(s) for s in sections)
+    if total_chars <= single_pass_chars and aux_call_fn is not None:
+        # fits one pass: a single read is more faithful than chunk->union (no fragmentation)
+        res.single_pass = True
+        res.n_chunks = 1
+        if progress:
+            progress(f"enumeration: corpus fits one pass ({total_chars} chars) -> single read")
+        from ultracode.adapters import aux_call
+        text = aux_call([{"role": "system", "content": "You are an exhaustive extractor. List every item, "
+                          "one per line, never summarize."},
+                         {"role": "user", "content": _enumeration_prompt(instruction, "\n\n".join(sections))}],
+                        max_tokens=8000, call_fn=aux_call_fn)
+        _collect([text])
+        res.caps_announced.append(
+            f"single-pass enumeration ({total_chars} chars fit one read): {len(res.items)} unique items")
+        return res
+
+    if progress:
+        progress(f"enumeration: {len(sections)} sections, concurrency {concurrency}, retry_empty {retry_empty}")
+    tasks = [{"goal": _enumeration_prompt(instruction, s)} for s in sections]
+    results = delegate_fanout(tasks, parent_agent=agent, max_children=cfg.max_children,
+                              concurrency=concurrency, delegate_fn=delegate_fn, retry_empty=retry_empty,
+                              worker_model=cfg.worker_model)
+    _collect([str(e.get("summary") or "") for e in results if isinstance(e, dict)])
+    dropped = len(sections) - res.chunks_covered
+    res.caps_announced.append(
+        f"enumerated {len(res.items)} unique items from {res.chunks_covered}/{len(sections)} sections")
+    if dropped:
+        res.caps_announced.append(
+            f"WARNING: {dropped} section(s) returned no output even after {retry_empty} refill rounds — "
+            f"coverage may be incomplete (raise retry_empty or lower per-chunk size)")
     return res

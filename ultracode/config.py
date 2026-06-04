@@ -42,6 +42,7 @@ class UltracodeConfig:
         ]
     )
     verify_quorum: int = 2         # votes-to-survive out of len(lenses)
+    verify_rounds: int = 1         # ITERATED REFUTATION: re-challenge survivors with fresh independent skeptic passes; a finding must survive EVERY round (converges when a round drops nothing). 1 = single pass (default); 2-3 for high-stakes finding-quality (audits) where one refute pass under-cooks it (teknium's adversarial-convergence)
     verify_default_refuted: bool = True  # the stance: uncertain -> refuted
     voi_verify: bool = True        # VOI triage: concentrate lenses where being wrong is costly (critical/high -> all, medium -> 2, low/info -> 1) — conservation of rigor, and a big cost cut at scale
     execution_verify: bool = False # ground-truth-once: RUN a repro to confirm findings (the only true exit from the closed loop). OFF by default — runs model-generated code; enable only for trusted/benchmark targets or behind a real sandbox
@@ -56,6 +57,12 @@ class UltracodeConfig:
     # -- orchestration scale (in-flight agents). None = sequential waves (real-Hermes-safe).
     # A concurrency-safe backend (DeepSeek client / patched Hermes core) can set this to 100+.
     concurrency: Optional[int] = None
+
+    # -- per-worker model (cost lever). None = workers inherit the parent's (expensive reasoning)
+    # model. Pin a cheaper model here and every fanned-out finder/extractor uses it — mechanical
+    # fan-out doesn't need the frontier reasoner. Only the planner/synthesis/verify aux calls keep
+    # the strong model. A direct, large cost cut at scale; applied unless a task pins its own model.
+    worker_model: Optional[str] = None
 
     # -- scale-to-the-ask --
     solo_by_default: bool = True   # restraint: orchestrate only on a real signal

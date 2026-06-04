@@ -116,6 +116,11 @@ class Finding:
     verdict: Optional[Verdict] = None
     votes: List[VerifierVote] = field(default_factory=list)
     survived: Optional[bool] = None
+    # how many INDEPENDENT finders/rounds converged on this same claim. Dedup used to
+    # discard duplicates outright; instead we count them — N independent attempts landing
+    # the same located claim is a real confidence signal (teknium's "agreement prior"),
+    # free to track and useful for ranking/synthesis. Starts at 1 (the finding itself).
+    agreement_count: int = 1
 
     def validate(self) -> "Finding":
         if not isinstance(self.claim, str) or not self.claim.strip():
@@ -157,6 +162,7 @@ class Finding:
             verdict=Verdict(v) if v else None,
             votes=[VerifierVote.from_dict(x) for x in d.get("votes", [])],
             survived=d.get("survived"),
+            agreement_count=(int(d["agreement_count"]) if d.get("agreement_count") is not None else 1),
         ).validate()
 
 
@@ -171,6 +177,9 @@ class SubtaskSpec:
     role: str = "leaf"  # 'leaf' | 'orchestrator'
     lens: Optional[VerifyLens] = None
     label: str = ""
+    # optional per-task model: mechanical fan-out workers (finders/extractors) shouldn't burn
+    # the expensive parent reasoning model. Pin a cheaper one here and it flows to delegate_task.
+    model: Optional[str] = None
 
     def validate(self) -> "SubtaskSpec":
         if not isinstance(self.goal, str) or not self.goal.strip():
@@ -190,6 +199,8 @@ class SubtaskSpec:
             t["toolsets"] = list(self.toolsets)
         if self.role and self.role != "leaf":
             t["role"] = self.role
+        if self.model:
+            t["model"] = self.model
         return t
 
 
@@ -258,6 +269,7 @@ def reconcile_findings(findings: List[Finding], *, similarity: float = 0.6) -> L
             shares_symbol = bool(floc & gloc) or not (floc or gloc)
             opposite = _polarity(f.claim) != _polarity(g.claim)  # contradiction: keep both
             if jac >= similarity and shares_symbol and not opposite:
+                g.agreement_count += f.agreement_count  # independent finders that converged
                 if f.evidence and f.evidence not in g.evidence:
                     g.evidence = (g.evidence + " | " + f.evidence).strip(" |")
                 if _sev_rank(f.severity) > _sev_rank(g.severity):
@@ -287,6 +299,7 @@ def dedupe_findings(findings: List[Finding]) -> List[Finding]:
             seen[k] = f
         else:
             existing = seen[k]
+            existing.agreement_count += f.agreement_count  # count the converging finder, don't drop it
             if f.evidence and f.evidence not in existing.evidence:
                 existing.evidence = (existing.evidence + " | " + f.evidence).strip(" |")
     return list(seen.values())

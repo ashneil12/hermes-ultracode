@@ -16,3 +16,7 @@ bench/results/
 .ultracode-bench/
 *deepseek*.env
 .env
+
+# fetched benchmark data (use the fetch_*.py scripts)
+bench/data/*.json
+bench/data/*.jsonl

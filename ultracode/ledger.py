@@ -99,21 +99,61 @@ class RunLedger:
         return out
 
     def findings(self) -> List[Finding]:
-        """Reconstruct every Finding recorded (from 'finding' and 'stage' events)."""
+        """Reconstruct every Finding recorded (from 'finding' and 'stage' events). A partial/corrupt
+        record (missing payload or a required field) is SKIPPED, not fatal — resume must survive an
+        interrupted mid-write ledger, which is exactly when it's needed."""
         out: List[Finding] = []
         for rec in self.read():
-            if rec.get("kind") == "finding":
-                out.append(Finding.from_dict(rec["payload"]))
-            elif rec.get("kind") == "stage":
-                for fd in rec.get("payload", {}).get("findings", []):
-                    out.append(Finding.from_dict(fd))
+            kind = rec.get("kind")
+            if kind == "finding":
+                fd = rec.get("payload")
+                if isinstance(fd, dict):
+                    try:
+                        out.append(Finding.from_dict(fd))
+                    except (KeyError, ValueError, TypeError):
+                        continue
+            elif kind == "stage":
+                for fd in (rec.get("payload") or {}).get("findings", []):
+                    if isinstance(fd, dict):
+                        try:
+                            out.append(Finding.from_dict(fd))
+                        except (KeyError, ValueError, TypeError):
+                            continue
         return out
 
     def caps(self) -> List[str]:
         caps: List[str] = []
         for rec in self.read():
-            if rec.get("kind") == "cap_announced":
-                caps.append(rec["payload"].get("message", ""))
-            elif rec.get("kind") == "stage":
-                caps.extend(rec.get("payload", {}).get("caps_announced", []))
+            kind = rec.get("kind")
+            if kind == "cap_announced":
+                caps.append((rec.get("payload") or {}).get("message", ""))
+            elif kind == "stage":
+                caps.extend((rec.get("payload") or {}).get("caps_announced", []))
         return [c for c in caps if c]
+
+    def resume_state(self) -> Dict[str, Any]:
+        """Reconstruct a resumable snapshot from this run's ledger: the distinct findings recorded so
+        far, the set of their dedup_keys (to prime a loop-until-dry seen-set so a resumed run doesn't
+        re-surface what the interrupted run already found), and the announced caps. Empty/absent/corrupt
+        ledger -> empty state (a fresh run). This is the cheap first half of durability: a re-invocation
+        with the same run_id can seed from here instead of re-deriving everything from scratch.
+
+        NB: we dedup by KEEPING THE MAX agreement_count per key, NOT summing — the harness records the
+        same finding in both the 'find' and 'verify' stages, so summing (as dedupe_findings does for
+        independent live finders) would inflate the count on every resume. Max is idempotent."""
+        by_key: Dict[str, Finding] = {}
+        for f in self.findings():
+            k = f.dedup_key()
+            cur = by_key.get(k)
+            if cur is None:
+                by_key[k] = f
+            elif f.agreement_count > cur.agreement_count:
+                by_key[k] = f
+        findings = list(by_key.values())
+        return {
+            "run_id": self.run_id,
+            "findings": findings,
+            "seen_keys": set(by_key.keys()),
+            "caps": self.caps(),
+            "resumed": bool(findings),
+        }

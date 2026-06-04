@@ -31,7 +31,7 @@ from ultracode.kinds import (
     TaskKind, classify_kind, research_depth_directive, skeptic_instruction, worker_instruction,
 )
 from ultracode.judge import judge_panel
-from ultracode.verify import survivors as _survivors, verify_findings
+from ultracode.verify import survivors as _survivors, verify_findings, verify_to_convergence
 
 
 @dataclass
@@ -362,7 +362,8 @@ def run(
                 return []  # planner declares the surface exhausted -> contributes to dry
         tasks = [{"goal": _finder_prompt(st.goal, context, st.context, known, _directive_for(st.goal))} for st in subtasks]
         results = delegate_fanout(tasks, parent_agent=agent, max_children=cfg.max_children,
-                                  concurrency=cfg.concurrency, delegate_fn=delegate_fn)
+                                  concurrency=cfg.concurrency, delegate_fn=delegate_fn,
+                                  worker_model=cfg.worker_model)
         found: List[Finding] = []
         for i, entry in enumerate(results):
             label = subtasks[i % len(subtasks)].goal[:48] if subtasks else f"finder-{i}"
@@ -430,9 +431,12 @@ def run(
 
     # --- adversarially verify: independent skeptics, default-to-refuted -------
     if decision.verify and findings:
-        verify_findings(findings, context=context, parent_agent=agent, config=cfg, lenses=decision.lenses,
-                        delegate_fn=verify_delegate_fn, concurrency=cfg.concurrency, skeptic_directive=skeptic_directive)
-        stages.append(f"verify({len(decision.lenses)} lenses, quorum {cfg.effective_quorum(len(decision.lenses))})")
+        verify_to_convergence(
+            findings, rounds=cfg.verify_rounds, context=context, parent_agent=agent, config=cfg,
+            lenses=decision.lenses, delegate_fn=verify_delegate_fn, concurrency=cfg.concurrency,
+            skeptic_directive=skeptic_directive)
+        rnd = f", {cfg.verify_rounds} rounds" if cfg.verify_rounds > 1 else ""
+        stages.append(f"verify({len(decision.lenses)} lenses, quorum {cfg.effective_quorum(len(decision.lenses))}{rnd})")
         survs = _survivors(findings)
     else:
         survs = findings

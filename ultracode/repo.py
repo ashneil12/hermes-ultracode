@@ -199,7 +199,8 @@ def audit_repo(
     if progress:
         progress(f"finders: {len(tasks)} chunks across {res.n_files} files (concurrency {concurrency})")
     results = delegate_fanout(tasks, parent_agent=agent, max_children=cfg.max_children,
-                              concurrency=concurrency, delegate_fn=delegate_fn)
+                              concurrency=concurrency, delegate_fn=delegate_fn,
+                              worker_model=cfg.worker_model)
     raw: List[Finding] = []
     for i, entry in enumerate(results):
         raw.extend(_parse(entry if isinstance(entry, dict) else {}, chunks[i]))
