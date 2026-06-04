@@ -81,6 +81,67 @@ def test_delegate_fanout_empty():
     assert delegate_fanout([], delegate_fn=lambda **k: "{}") == []
 
 
+def test_delegate_fanout_retry_empty_refills_holes():
+    # a worker returns empty (finish_reason=length style) the FIRST time it sees a task, then
+    # succeeds on retry. retry_empty must re-dispatch only that task and fill the hole.
+    seen = {}
+
+    def flaky(*, tasks, parent_agent, role):
+        results = []
+        for i, t in enumerate(tasks):
+            g = t["goal"]
+            n = seen.get(g, 0)
+            seen[g] = n + 1
+            # task "b" comes back empty on its first attempt, fills on the second
+            summary = "" if (g == "b" and n == 0) else f"ok:{g}"
+            status = "completed" if summary else "error"
+            results.append({"task_index": i, "status": status, "summary": summary})
+        return json.dumps({"results": results})
+
+    tasks = [{"goal": "a"}, {"goal": "b"}, {"goal": "c"}]
+    out = delegate_fanout(tasks, delegate_fn=flaky, max_children=3, retry_empty=2)
+    assert [e["summary"] for e in out] == ["ok:a", "ok:b", "ok:c"]  # hole refilled
+    assert seen["a"] == 1 and seen["c"] == 1  # successes NOT re-run
+    assert seen["b"] == 2  # only the hole was retried
+
+
+def test_delegate_fanout_retry_empty_off_by_default_leaves_hole():
+    def once_empty(*, tasks, parent_agent, role):
+        results = [{"task_index": i, "status": "completed", "summary": ("" if t["goal"] == "b" else t["goal"])}
+                   for i, t in enumerate(tasks)]
+        return json.dumps({"results": results})
+
+    out = delegate_fanout([{"goal": "a"}, {"goal": "b"}], delegate_fn=once_empty)  # retry_empty=0
+    assert out[1]["summary"] == ""  # hole left as-is when retries are off (backward compatible)
+
+
+def test_aux_call_escalates_budget_on_empty_then_succeeds():
+    # simulate a reasoning model that returns "" until given enough budget
+    seen_budgets = []
+
+    def starving(**kwargs):
+        mt = kwargs["max_tokens"]
+        seen_budgets.append(mt)
+        return "the answer" if (mt or 0) >= 4000 else ""
+
+    from ultracode.adapters import aux_call
+    out = aux_call([{"role": "user", "content": "hi"}], max_tokens=1000, call_fn=starving)
+    assert out == "the answer"
+    assert seen_budgets == [1000, 2000, 4000]  # doubled until non-empty
+
+
+def test_aux_call_no_escalation_without_budget():
+    calls = {"n": 0}
+
+    def empty(**kwargs):
+        calls["n"] += 1
+        return ""
+
+    from ultracode.adapters import aux_call
+    out = aux_call([{"role": "user", "content": "hi"}], max_tokens=None, call_fn=empty)
+    assert out == "" and calls["n"] == 1  # no budget set -> no escalation loop
+
+
 def test_aux_call_with_openai_shaped_fake():
     class _Msg:
         content = "hello"

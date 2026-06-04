@@ -127,11 +127,19 @@ class DeepSeekClient:
         def one(idx_task):
             i, t = idx_task
             t0 = time.time()
-            resp = self.chat(
-                [{"role": "system", "content": _WORKER_SYSTEM}, {"role": "user", "content": t["goal"]}],
-                temperature=0.4, max_tokens=4000,
-            )
-            content = self._content(resp)
+            # ADAPTIVE WORKER BUDGET: deepseek is a reasoning model — a tight max_tokens is eaten by
+            # thinking and returns EMPTY (finish_reason=length). A host bridging delegate_task to a
+            # reasoning backend MUST escalate the worker budget on an empty return, or dense workers
+            # silently drop their whole chunk. (delegate_task's fixed signature gives the harness no
+            # way to request this, so it belongs HERE in the bridge — the real home of Fix #1.)
+            msgs = [{"role": "system", "content": _WORKER_SYSTEM}, {"role": "user", "content": t["goal"]}]
+            budget, content, resp = 4000, "", None
+            for _ in range(3):
+                resp = self.chat(msgs, temperature=0.4, max_tokens=budget)
+                content = self._content(resp)
+                if content.strip():
+                    break
+                budget *= 2
             status = "completed" if content else "error"
             u = getattr(resp, "usage", None) if resp is not None else None
             return {

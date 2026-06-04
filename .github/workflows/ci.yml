@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: install (test deps only — core is stdlib-only)
+        run: pip install pytest
+      - name: unit tests (no network, fakes injected)
+        run: python -m pytest tests/ -q -o addopts=""
+      - name: import the package with zero third-party deps
+        run: |
+          pip uninstall -y openai >/dev/null 2>&1 || true
+          python -c "import ultracode.harness, ultracode.integration, ultracode.install; print('ultracode imports clean, no deps')"
+      - name: installer dry-run against a synthetic host
+        run: |
+          mkdir -p /tmp/fakehost/tools /tmp/fakehost/agent
+          printf 'import threading\n_lock = threading.Lock()\ndef delegate_task(**k): ...\n' > /tmp/fakehost/tools/delegate_tool.py
+          printf 'def call_llm(**k): ...\n' > /tmp/fakehost/agent/auxiliary_client.py
+          python -m ultracode.install --agent /tmp/fakehost --check
