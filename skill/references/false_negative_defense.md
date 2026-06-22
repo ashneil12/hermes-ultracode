@@ -41,3 +41,18 @@ whole sink classes (pickle.load, yaml.load, __import__) that were never even sco
 A clean result is "no issue found in the scanned surface with the scoped patterns,"
 NOT "this is safe." State the surface and the patterns so the gap is visible. The
 deterministic denominator is what turns a vibe into an accountable coverage claim.
+
+## PROOF: tool-using finder vs eyeballing finder (same codebase, measured)
+Same task (shell/exec sink audit of vanilla-hermes-agent), two methods:
+
+| | Original 30 finders (read text blobs) | 1 finder w/ FINDER persona (grep-first) |
+|---|---|---|
+| line numbers | FABRICATED (voice_mode.py:1589 doesn't exist) | all real (from grep) |
+| tools_config.py:822 | MISSED (false negative) | found, correctly judged safe |
+| denominator | none ("26 chunks clean") | 23 sink call-sites, 7 dangerous / 16 safe |
+| time/cost | 30 agents, 158s | 1 agent, 131s |
+
+Conclusion: the subagents always HAD grep (leaf agents inherit terminal). The
+eyeballing dispatch made them hallucinate + miss. The fix is the persona, not more
+agents. One grep-grounded finder beat 30 eyeballing ones on accuracy AND recall.
+This is the whole case for subagent_personas.md (inject the FINDER persona via context).
