@@ -20,3 +20,8 @@ bench/results/
 # fetched benchmark data (use the fetch_*.py scripts)
 bench/data/*.json
 bench/data/*.jsonl
+
+# session scratch
+bench/_review2_corpus.txt
+__pycache__/
+*.pyc

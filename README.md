@@ -14,6 +14,24 @@ Ported from the "ultracode" mode of Claude Code into a self-contained, runtime-a
 package. It drives any backend you give it (a frontier model, a local model, or a cheap/weak one)
 through two injected callables — **no third-party dependencies, only the standard library.**
 
+## Install as a Hermes skill (one command)
+
+This repo is also a **drop-in skill for any Hermes agent** — it ships the doctrine, the
+auto-firing skill, AND the engine, fully self-contained. Point an agent at it and run:
+
+```bash
+git clone https://github.com/ashneil12/hermes-ultracode.git \
+  && cd hermes-ultracode && ./install.sh
+```
+
+Or tell your Hermes agent: **"clone https://github.com/ashneil12/hermes-ultracode and run install.sh"**.
+
+That installs the skill + engine into `~/.hermes/skills/` (user-data, so it **survives upstream
+desktop-app updates**). The skill then auto-fires on substantive tasks (audits, find-all sweeps,
+design decisions, high-stakes work) — you don't invoke it; it engages when the work warrants it.
+Trigger words `ultracode` / `ultrathink` / `go all in` force maximum rigor explicitly. The
+deterministic gate and `enumerate_corpus` work with zero extra setup. See `skill/SKILL.md`.
+
 ## The headline — a benchmark that actually requires orchestration
 
 Atomic benchmarks (GSM8K/HumanEval/MATH) *can't* reward orchestration: each problem fits in one
