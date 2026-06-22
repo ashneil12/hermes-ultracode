@@ -170,6 +170,14 @@ subagent per section, union+dedup the located claims, re-dispatch any empty/erro
 section once. The coverage guarantee is the whole point — never let a dropped chunk
 silently cap recall.
 
+**Reactive vs barrier (see `references/reactive_conducting.md`):** for a known uniform
+split (scan N files for X), one barrier wave is correct and cheap. For a branching
+surface (debugging, trace-this, research where one find opens new questions), use
+SMALL reactive waves: seed a few scouts, let their results spawn the next wave, loop
+until a wave adds nothing. That's the live approximation of the harness's true
+no-barrier `run_reactive` (delegate_task returns batches, so I react between waves,
+not mid-wave). React when results change the work-list; barrier when they don't.
+
 ## The non-negotiables (these are what make it ultracode)
 
 1. **Default-to-refuted** on every load-bearing claim — including my own front-runner
