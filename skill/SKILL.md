@@ -190,6 +190,12 @@ not mid-wave). React when results change the work-list; barrier when they don't.
 4. **Independence is everything** — N agreeing non-independent sources are 1.
 5. **A green/success is evidence, not a conclusion** — the moment the symptom vanishes
    is the most dangerous moment. Optimize for works-for-a-stated-confirmed-reason.
+   Corollary: a finder's "NONE"/clean result is ALSO just evidence, not a conclusion.
+   Empty = UNKNOWN, not safe. The verify pass kills false POSITIVES; false NEGATIVES
+   need a separate defense — see `references/false_negative_defense.md` (deterministic
+   ground-truth denominator + cross-check + complete sink-class scope + loop-until-dry).
+   Proven live: a 30-finder sweep called 26 chunks "clean" but a grep found a real
+   shell=True sink no finder named. Never report absence-of-findings as safety.
 6. **Restraint** — knowing when NOT to spend is the same skill as knowing when to. On
    bounded/coupled/voice work, orchestration is negative-EV. Staying solo is an active,
    defended decision against my own orchestration reflex.
@@ -274,6 +280,35 @@ traps cost real time. See `references/benchmark.md` (full runs) and
   the live path. Validated: clawsweeper ghJson, 120 files, 1.00 recall after retry.
 - **Never blind force_orchestrate.** Route through the difficulty gate (gate.py with
   ULTRACODE_CONTEXT_CHARS) or you burn the cost for a tie.
+
+## The verify pass is NON-OPTIONAL — fan-out fabricates confident findings
+
+Live-proven this session (30-agent shell/exec sweep over a 21.9M-char codebase):
+the fan-out produced **4 polished findings with specific file:line numbers**, and an
+adversarial verify pass **REFUTED ALL 4** — the cited line numbers were *fabricated*
+(e.g. "voice_mode.py:1589" in a 1218-line file; the real sink was a different module
+entirely, and not reachable by untrusted input). This is `fan-out-over-a-phantom`
+amplified: more finders = more confident, professional-looking, WRONG output.
+
+Hard rules that follow:
+- **A fan-out finding is testimony, not fact — INCLUDING its cited location.** Finders
+  hallucinate line numbers that pattern-match real-ish code. Never report a finder's
+  file:line as fact; a skeptic must re-open the actual file and confirm the sink exists
+  AND that untrusted input reaches it.
+- **For audit/review, the verify pass is mandatory, not a nicety.** Skipping it ships
+  hallucinated vulns as fact. Spawn one skeptic per top finding: default-to-refuted,
+  give it the SOURCE not the finder's claim, make it trace input->sink provenance and
+  quote real line numbers, and demand a concrete exploitation path or REFUTE.
+- **"Looks dangerous" != "is exploitable."** Most refutations this session turned on
+  provenance: the input was operator-curated / regex-validated / auth-gated / only
+  human-writable before the sink. A `shell=True` with a trusted-only input path is
+  by-design, not a vuln (same trust level as the user's own `.bashrc`).
+- **Separate the real residue.** Even when the "vuln" is refuted, skeptics often
+  surface genuine latent risks (e.g. no confirmation prompt before a manifest-driven
+  shell call — safe today, live RCE the day the trust boundary moves). Report those
+  as calibrated "latent, file a ticket," distinct from confirmed-exploitable.
+
+Full case transcript: `references/verify-pass-case.md`.
 
 ## Failure library (each a thing to actively guard against)
 
