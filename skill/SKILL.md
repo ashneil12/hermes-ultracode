@@ -146,6 +146,12 @@ No Hermes runtime dependency, works every session.
 - **Fan-out**: dispatch independent units as parallel leaf tasks with DIFFERENT
   framings per child (so they don't collapse to one line of reasoning). Each emits
   ATOMIC, LOCATED, individually-falsifiable claims (one per line).
+  **Make finders SMART, not babysat:** inject a specialist persona via the `context`
+  field (see `references/subagent_personas.md`) so each subagent brings its own rigor
+  — grep-first / cite-real-lines / default-to-refuted — instead of you hand-writing
+  method per dispatch. Leaf subagents HAVE terminal+grep+read_file (they inherit the
+  parent's tools); a finder that eyeballs a text blob instead of running grep is a
+  misuse. Tell it to ground-truth with tools, every location from a real command.
 - **Adversarial verify**: re-dispatch survivors to FRESH skeptic tasks, give them the
   SOURCES not the finders' reasoning, default-to-refuted, keep only what survives.
 - **Synthesize solo**: read the artifacts, graft, lead with the killed-and-confirmed.
