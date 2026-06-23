@@ -32,8 +32,10 @@ import ast, os, sys, json, argparse, re
 
 # Sinks where the DANGER is intrinsic to the call (any invocation is a code-exec sink):
 _INTRINSIC = {"eval", "exec"}  # builtins
-_OS_INTRINSIC = {"system", "popen", "execv", "execve", "execvp", "execvpe",
-                 "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnvp"}
+# Only os.system / os.popen are SHELL sinks. The os.exec* / os.spawn* family is
+# process-replacement via argv array (no shell interpretation), same trust level
+# as subprocess.run(list) — NOT an injection sink. Do not flag them as such.
+_OS_SHELL = {"system", "popen"}
 _PICKLE = {"loads", "load"}
 _MARSHAL = {"loads", "load"}
 
@@ -49,6 +51,20 @@ def _const_value(node):
     if isinstance(node, ast.Constant):
         return node.value
     return None
+
+
+def _arg_is_const(node) -> bool:
+    """True if the arg is a literal constant, or a ternary/joined-string of only constants.
+    Covers: ast.Constant, IfExp(test=any, body/orelse=const), JoinedStr of const parts."""
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, ast.IfExp):
+        return _arg_is_const(node.body) and _arg_is_const(node.orelse)
+    if isinstance(node, ast.JoinedStr):
+        return all(_arg_is_const(v) for v in node.values)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _arg_is_const(node.left) and _arg_is_const(node.right)
+    return False
 
 
 def _has_shell_true(call: ast.Call) -> bool:
@@ -111,14 +127,17 @@ def scan_file(path: str):
 
         # 1) eval() / exec() builtins
         if isinstance(node.func, ast.Name) and node.func.id in _INTRINSIC:
-            # flag unless the arg is an obvious constant (rare; eval("1+1") is not a sink)
-            if node.args and _const_value(node.args[0]) is None:
+            # flag unless the arg is a constant (eval("1+1") is not an injection sink)
+            if node.args and not _arg_is_const(node.args[0]):
                 sink_type, detail = "eval/exec", node.func.id
 
-        # 2) os.system / os.popen / os.exec* / os.spawn*
-        elif isinstance(node.func, ast.Attribute) and node.func.attr in _OS_INTRINSIC \
+        # 2) os.system / os.popen (the ONLY os.* shell sinks; os.exec* is argv, not shell)
+        elif isinstance(node.func, ast.Attribute) and node.func.attr in _OS_SHELL \
                 and isinstance(node.func.value, ast.Name) and node.func.value.id == "os":
-            sink_type, detail = "os.shell-exec", f"os.{node.func.attr}"
+            # flag os.system/popen only when the arg is not constant (constants can't inject).
+            # A ternary of constants ("cls" if x else "clear") is also safe.
+            if node.args and not _arg_is_const(node.args[0]):
+                sink_type, detail = "os.shell-exec", f"os.{node.func.attr}"
 
         # 3) subprocess.* with shell=True (and create_subprocess_shell always)
         elif isinstance(node.func, ast.Attribute):
@@ -146,7 +165,7 @@ def scan_file(path: str):
 
         # 4) __import__ of non-constant input
         elif isinstance(node.func, ast.Name) and node.func.id == "__import__":
-            if node.args and _const_value(node.args[0]) is None:
+            if node.args and not _arg_is_const(node.args[0]):
                 sink_type, detail = "__import__ (dynamic)", "__import__"
 
         if not sink_type:
