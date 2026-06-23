@@ -78,6 +78,31 @@ def scan_file(path: str):
     except (SyntaxError, ValueError, OSError):
         return
     src_lines = src.splitlines()
+
+    # File-level context for YAML precision: is `yaml` the PyYAML module, or a
+    # ruamel YAML() instance? If the file imports ruamel OR assigns `yaml = YAML(...)`,
+    # a bare `yaml.load(x)` is the ruamel round-trip loader (not the unsafe PyYAML
+    # class) -> downgrade from "unsafe" to "verify-loader".
+    uses_ruamel = False
+    safe_loader_names = {"SafeLoader", "CSafeLoader"}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom) and getattr(n, "module", "") and "ruamel" in (n.module or ""):
+            uses_ruamel = True
+        if isinstance(n, ast.Assign):
+            tgt = n.targets[0]
+            if isinstance(tgt, ast.Name) and tgt.id == "yaml" and isinstance(n.value, ast.Call):
+                fn = n.value.func
+                if (isinstance(fn, ast.Name) and fn.id == "YAML") or \
+                   (isinstance(fn, ast.Attribute) and fn.attr == "YAML"):
+                    uses_ruamel = True
+            # Track variables assigned to safe PyYAML loaders, e.g.
+            #   loader = getattr(yaml, "CSafeLoader", None) or yaml.SafeLoader
+            #   yaml.load(value, Loader=loader)
+            if isinstance(tgt, ast.Name):
+                val_src = ast.unparse(n.value) if hasattr(ast, "unparse") else ""
+                if "SafeLoader" in val_src and "UnsafeLoader" not in val_src:
+                    safe_loader_names.add(tgt.id)
+
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -111,8 +136,13 @@ def scan_file(path: str):
                 sink_type, detail = "pickle (deserialize)", f"pickle.{attr}"
             elif attr in _MARSHAL and mod_name == "marshal":
                 sink_type, detail = "marshal (deserialize)", f"marshal.{attr}"
-            elif attr == "load" and mod_name == "yaml" and not _loader_is_safe(node, {"SafeLoader", "CSafeLoader"}):
-                sink_type, detail = "yaml.load (unsafe)", "yaml.load"
+            elif attr == "load" and mod_name == "yaml":
+                if uses_ruamel:
+                    # ruamel round-trip loader — NOT the PyYAML deserialization-RCE class.
+                    # Downgrade: surface for review but don't call it "unsafe".
+                    sink_type, detail = "yaml.load (ruamel/verify-loader)", "ruamel yaml.load"
+                elif not _loader_is_safe(node, safe_loader_names):
+                    sink_type, detail = "yaml.load (unsafe)", "yaml.load"
 
         # 4) __import__ of non-constant input
         elif isinstance(node.func, ast.Name) and node.func.id == "__import__":

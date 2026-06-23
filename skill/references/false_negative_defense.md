@@ -70,8 +70,9 @@ Cross-check mode turns a fan-out result into an accountable coverage claim:
 prints every ground-truth sink NO finder named = false-negative candidates. The
 denominator (24 on Hermes) is the number that makes "looks clean" falsifiable.
 
-Honest limitation: the scanner is COMPLETE (catches every sink in the class) but
-not perfectly PRECISE (it over-flagged a ruamel.yaml RT loader, which isn't the
-unsafe loader). That's the correct division: scanner = denominator (nothing
-invisible), verify/human = triage each hit. Never report the raw scanner count
-as "24 vulnerabilities" — it's "24 sinks to triage."
+Honest limitation: the scanner is a DENOMINATOR, not a vuln oracle. It classifies
+sink classes and gives the verify pass a complete work-list. It now distinguishes
+common safe YAML patterns (`SafeLoader`/`CSafeLoader`) and downgrades ruamel
+round-trip loaders to `yaml.load (ruamel/verify-loader)`, but each hit is still a
+sink to triage, not an automatic vulnerability. Never report the raw scanner count
+as "N vulnerabilities" — it's "N sinks to triage."
