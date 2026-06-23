@@ -56,3 +56,22 @@ Conclusion: the subagents always HAD grep (leaf agents inherit terminal). The
 eyeballing dispatch made them hallucinate + miss. The fix is the persona, not more
 agents. One grep-grounded finder beat 30 eyeballing ones on accuracy AND recall.
 This is the whole case for subagent_personas.md (inject the FINDER persona via context).
+
+## The real tool (not just prose)
+
+`scripts/ground_truth_scan.py` is the binding version of defense #1-3. AST-based
+(walks the Python AST, so regex-STRING detector patterns in approval.py /
+security-guidance are NOT flagged — the AST distinguishes a string literal from a
+Call node). Proven on the Hermes repo: catches the tools_config.py:822 sink the
+LLM fan-out missed, and the full sink-class spread (pickle/yaml/import/shell).
+
+Cross-check mode turns a fan-out result into an accountable coverage claim:
+  python3 scripts/ground_truth_scan.py <repo> --findings fanout.md --crosscheck
+prints every ground-truth sink NO finder named = false-negative candidates. The
+denominator (24 on Hermes) is the number that makes "looks clean" falsifiable.
+
+Honest limitation: the scanner is COMPLETE (catches every sink in the class) but
+not perfectly PRECISE (it over-flagged a ruamel.yaml RT loader, which isn't the
+unsafe loader). That's the correct division: scanner = denominator (nothing
+invisible), verify/human = triage each hit. Never report the raw scanner count
+as "24 vulnerabilities" — it's "24 sinks to triage."
