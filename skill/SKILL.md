@@ -1,20 +1,23 @@
 ---
 name: ultracode
 description: >-
-  Maximum-rigor operating mode. A steering doctrine that decides HOW to think on
-  substantive work. Solo by default, orchestrate only when it genuinely pays,
-  adversarially verify every load-bearing claim, and ground-truth conclusions
-  against reality before reporting. Auto-engages on debugging, audits, find-all
-  sweeps, high-stakes builds, and research. Trigger words include ultracode,
-  ultrathink, think harder, go all in, maximum rigor. Ported from the user's own
-  hermes-ultracode harness (DOCTRINE.md plus steering.py). Execution runs on
-  native subagent and delegate tools, with the Python steering gate available as
-  a deterministic decision oracle and the harness reserved for large multi-file
-  repo audits where it provably wins.
+  Maximum-rigor operating mode for substantive work on a codebase or research
+  task. Solo by default; orchestrates parallel subagents when the corpus is too
+  large or branching for a single pass, adversarially verifies every load-bearing
+  finding, and runs a deterministic ground-truth scan (AST, not grep) to
+  cross-check fan-out recall so nothing is missed. Auto-engages on: large-repo
+  audits and security sweeps, exhaustive find-all-X across many files, debugging
+  real failures, high-stakes builds, and multi-angle research. This is the
+  META-skill that decides HOW to approach the work — it subsumes narrower
+  audit/review skills when the job is bigger than a quick solo grep can handle
+  honestly. Trigger words: ultracode, ultrathink, think harder, go all in,
+  maximum rigor, build out everything. Ported from the user's own
+  hermes-ultracode harness (DOCTRINE.md + steering.py + ground_truth_scan.py).
 when_to_use:
   - Debugging a real failure (bug, crash, regression, why-does)
   - Audits, security review, review-this-for-vulnerabilities
   - Exhaustive sweeps (find all X, every place that, list all instances)
+  - Large or multi-file repos where a solo grep pass would miss things or take too long — orchestrate parallel finders + ground-truth scan
   - High-stakes or precision-critical work where being confidently wrong is costly
   - Design or architecture decisions with real tradeoffs
   - Multi-angle research where sources must be cross-checked
@@ -176,13 +179,20 @@ subagent per section, union+dedup the located claims, re-dispatch any empty/erro
 section once. The coverage guarantee is the whole point — never let a dropped chunk
 silently cap recall.
 
-**Reactive vs barrier (see `references/reactive_conducting.md`):** for a known uniform
-split (scan N files for X), one barrier wave is correct and cheap. For a branching
-surface (debugging, trace-this, research where one find opens new questions), use
-SMALL reactive waves: seed a few scouts, let their results spawn the next wave, loop
-until a wave adds nothing. That's the live approximation of the harness's true
-no-barrier `run_reactive` (delegate_task returns batches, so I react between waves,
-not mid-wave). React when results change the work-list; barrier when they don't.
+**Reactive vs barrier — ALL OR NOTHING (user preference, do not half-measure):**
+the user explicitly rejected "small reactive waves" as a half-measure. Pick one of
+exactly two modes, never the middle:
+- **Barrier wave** (the default): dispatch the whole fan-out, wait for the batch,
+  then synthesize. Correct for a known uniform split (scan N files for X). This is
+  what `TaskDelegate` natively does (results return as one consolidated batch).
+- **True no-barrier reactive**: only via the harness's `pipeline.run_reactive()`
+  driving a concurrency-safe pollable backend (Model A / the deepseek bench client),
+  which spawns the instant ANY worker returns. Use for deeply-branching jobs.
+True per-completion reactive is NOT reachable from live Model B: `TaskDelegate`
+returns batches, not per-completion callbacks, and the wiring to change that lives in
+upstream core (`tools/delegate_tool.py`) which is WIPED on every desktop-app update —
+so do not "fix" it with a core edit. If true reactive is wanted durably, it must be
+an upstream PR or a plugin, not a self-destructing core patch.
 
 ## The non-negotiables (these are what make it ultracode)
 
@@ -200,8 +210,13 @@ not mid-wave). React when results change the work-list; barrier when they don't.
    Empty = UNKNOWN, not safe. The verify pass kills false POSITIVES; false NEGATIVES
    need a separate defense — see `references/false_negative_defense.md` (deterministic
    ground-truth denominator + cross-check + complete sink-class scope + loop-until-dry).
-   Proven live: a 30-finder sweep called 26 chunks "clean" but a grep found a real
-   shell=True sink no finder named. Never report absence-of-findings as safety.
+   **Proven live with a measured recall number:** a 30-finder sweep called 26 chunks
+   "clean," but a precision-tightened AST scanner then gave a ground-truth denominator
+   of 17 real sinks, and the fan-out had named only **7 of 17 (41% recall)** — 10 false
+   negatives, blind to whole sink classes (pickle/yaml/import) and one same-class sink
+   the chunking split across 3 finders. If you ran a sweep without producing a
+   ground-truth denominator + recall %, the "clean" verdict is unfounded — say so.
+   Never report absence-of-findings as safety.
 6. **Restraint** — knowing when NOT to spend is the same skill as knowing when to. On
    bounded/coupled/voice work, orchestration is negative-EV. Staying solo is an active,
    defended decision against my own orchestration reflex.
@@ -215,6 +230,17 @@ not mid-wave). React when results change the work-list; barrier when they don't.
 10. **Calibrate to the domain** — in domains where this solver is systematically
     confidently-wrong (concurrency, floating-point, time, security, others' intent),
     ground externally REGARDLESS of stakes. Comfortable confidence there is the alarm.
+11. **Subagents are SMART specialists, not babysat text-readers.** They inherit the
+    parent's full toolset (terminal, grep/rg, read_file) — a finder that eyeballs a
+    pasted text blob instead of running grep is a misuse that produces hallucinated
+    line numbers. Inject a specialist PERSONA via the `context` field (the child's
+    system prompt is built from goal+context) so each carries its own method —
+    grep-first, cite-only-real-command-output, default-to-refuted — instead of you
+    hand-writing every step per dispatch. Write the persona ONCE
+    (`references/subagent_personas.md`), keep the `goal` terse (the target), let the
+    persona carry the rigor. This mirrors CC's agent-definition files (`tools:`
+    declared + method baked in); Hermes has no agents/ lookup so deliver it through
+    context. `goal` = WHAT, persona = HOW.
 
 ## Cost discipline (the thing that bites)
 
