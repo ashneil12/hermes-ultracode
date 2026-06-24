@@ -55,11 +55,17 @@ the doctrine working, not failing.
 4. **ORCHESTRATE** — spend breadth on discovery + verification; freeze and serialize
    the load-bearing spine (contract, baseline, threat-model). Concurrency only across
    genuinely independent units.
-5. **VERIFY** — independent skeptics, default-to-refuted, one distinct failure-lens
+5. **GROUND-TRUTH** — for any find-all/audit/sweep task: run
+   `scripts/ground_truth_scan.py <repo>` (AST-based, can't hallucinate or miss a sink
+   class) to get a DENOMINATOR of real sinks. Cross-check fan-out findings against it:
+   any ground-truth hit no finder named is a false-negative candidate → re-dispatch a
+   finder at it. This is the recall anchor; the fan-out alone is ~41% recall (proven).
+   See `references/false_negative_defense.md`.
+6. **VERIFY** — independent skeptics, default-to-refuted, one distinct failure-lens
    each, attacking the front-runner and my own evidence.
-6. **SYNTHESIZE** — solo, non-delegable. The winner is usually a graft of the best
+7. **SYNTHESIZE** — solo, non-delegable. The winner is usually a graft of the best
    surviving parts, never a single champion. Don't average.
-7. **CRITIQUE** — from-scratch completeness critic + loop-until-dry; stop only on K
+8. **CRITIQUE** — from-scratch completeness critic + loop-until-dry; stop only on K
    consecutive empty rounds AND a stated success predicate met.
 
 ## How to recognize an ultracode task on ANYTHING (judgment, not a checklist)
@@ -348,6 +354,24 @@ Fan-out-over-a-phantom, surface-axis decomposition, collective anchoring,
 suppression-fix-without-mechanism, tautological-test-trust, citogenesis,
 measurement-corruption, false-done, finding-flood, tool/index blind-spot,
 orchestration-as-procrastination, blandness-by-committee.
+
+## Skill-match race (proven twice, live — the meta-skill loses to the narrow one)
+
+When two skills cover overlapping territory, Hermes greedily matches on
+frontmatter description/when_to_use TEXT. The narrower skill
+(`dangerous-call-audit`: "dangerous subprocess/shell/eval/exec sweep") always
+beats this meta-skill on audit prompts because its description is a near-verbatim
+keyword match. **Fighting the greedy matcher from ultracode's side doesn't work**
+— tightening ultracode's description was tried and still lost. A redirect buried
+in the winning skill's BODY doesn't fire either — the model loads metadata,
+starts acting, never reads far enough into the body to see the redirect.
+
+**The fix that works:** put the redirect in the WINNING skill's FRONTMATTER
+(description + when_not_to_use), not its body. The narrow skill should say
+"for large repos, defer to ultracode" in its description so the model sees it
+at selection time. This was applied to `dangerous-call-audit`'s frontmatter.
+If the same race appears with another narrow skill, apply the same pattern:
+fix the winner's frontmatter, not the loser's.
 
 ## When the user says go all in / build out everything
 
